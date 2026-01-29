@@ -1,65 +1,20 @@
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    const path = url.pathname;
 
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type"
-    };
+    // Get all payments for admin
+    if (path === "/admin/payments") {
+      const { results } = await env.DB.prepare(
+        "SELECT order_id, amount, method, status FROM payments ORDER BY id DESC"
+      ).all();
 
-    // CORS preflight
-    if (request.method === "OPTIONS") {
-      return new Response("OK", { headers: corsHeaders });
+      return new Response(JSON.stringify(results), {
+        headers: { "Content-Type": "application/json" }
+      });
     }
 
-    // Home test
-    if (url.pathname === "/") {
-      return new Response("Backend Live 🚀", { headers: corsHeaders });
-    }
-
-    // Register
-    if (url.pathname === "/register" && request.method === "POST") {
-      const { name, email, password } = await request.json();
-
-      try {
-        await env.DB.prepare(
-          "INSERT INTO users (name,email,password) VALUES (?,?,?)"
-        ).bind(name, email, password).run();
-
-        return new Response(
-          JSON.stringify({ success: true, message: "Registered" }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      } catch {
-        return new Response(
-          JSON.stringify({ success: false, message: "User exists" }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-    }
-
-    // Login
-    if (url.pathname === "/login" && request.method === "POST") {
-      const { email, password } = await request.json();
-
-      const user = await env.DB.prepare(
-        "SELECT * FROM users WHERE email=? AND password=?"
-      ).bind(email, password).first();
-
-      if (!user) {
-        return new Response(
-          JSON.stringify({ success: false, message: "Invalid login" }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-
-      return new Response(
-        JSON.stringify({ success: true, user }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    return new Response("Not Found", { status: 404, headers: corsHeaders });
+    // Default route
+    return new Response("Chai Hotel Backend Running 🚀");
   }
-};
+}
