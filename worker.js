@@ -3,7 +3,7 @@ export default {
 
     const url = new URL(request.url);
 
-    // CORS
+    // ===== CORS =====
     if (request.method === "OPTIONS") {
       return new Response("", {
         headers: {
@@ -18,13 +18,12 @@ export default {
     if (url.pathname === "/create-order" && request.method === "POST") {
 
       const { amount } = await request.json();
-
-      const razorpayKey = env.RAZORPAY_SECRET_KEY;
+      const keySecret = env.RAZORPAY_SECRET_KEY;
 
       const orderRes = await fetch("https://api.razorpay.com/v1/orders", {
         method: "POST",
         headers: {
-          "Authorization": "Basic " + btoa(razorpayKey + ":"),
+          "Authorization": "Basic " + btoa(keySecret + ":"),
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
@@ -33,9 +32,9 @@ export default {
         })
       });
 
-      const orderData = await orderRes.json();
+      const data = await orderRes.json();
 
-      return new Response(JSON.stringify(orderData), {
+      return new Response(JSON.stringify(data), {
         headers: {
           "Access-Control-Allow-Origin": "*",
           "Content-Type": "application/json"
@@ -43,25 +42,40 @@ export default {
       });
     }
 
-    // ===== PAYMENT WEBHOOK =====
+    // ===== RAZORPAY WEBHOOK VERIFY =====
     if (url.pathname === "/razorpay-webhook" && request.method === "POST") {
 
       const secret = env.RAZORPAY_WEBHOOK_SECRET;
       const body = await request.text();
       const signature = request.headers.get("x-razorpay-signature");
 
-      const crypto = await import("crypto");
-      const expectedSignature = crypto
-        .createHmac("sha256", secret)
-        .update(body)
-        .digest("hex");
+      // --- Web Crypto HMAC ---
+      const enc = new TextEncoder();
+      const keyData = enc.encode(secret);
 
-      if (signature !== expectedSignature) {
+      const cryptoKey = await crypto.subtle.importKey(
+        "raw",
+        keyData,
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"]
+      );
+
+      const signatureData = await crypto.subtle.sign(
+        "HMAC",
+        cryptoKey,
+        enc.encode(body)
+      );
+
+      const expectedSignature = Array.from(new Uint8Array(signatureData))
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join("");
+
+      if (expectedSignature !== signature) {
         return new Response("Invalid signature", { status: 400 });
       }
 
-      // Payment verified
-      return new Response("OK");
+      return new Response("Payment Verified ✅");
     }
 
     return new Response("Chai Hotel Backend Running 🚀");
