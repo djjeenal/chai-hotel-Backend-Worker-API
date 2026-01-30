@@ -1,9 +1,8 @@
 export default {
   async fetch(request, env) {
-
     const url = new URL(request.url);
 
-    // ===== CORS =====
+    // ================= CORS =================
     if (request.method === "OPTIONS") {
       return new Response("", {
         headers: {
@@ -14,60 +13,60 @@ export default {
       });
     }
 
-    // ===== CREATE RAZORPAY ORDER =====
+    // ================= CREATE RAZORPAY ORDER =================
     if (url.pathname === "/create-order" && request.method === "POST") {
-
       const { amount } = await request.json();
-      const keySecret = env.RAZORPAY_SECRET_KEY;
 
-      const orderRes = await fetch("https://api.razorpay.com/v1/orders", {
+      const auth = btoa(
+        env.RAZORPAY_KEY_ID + ":" + env.RAZORPAY_SECRET_KEY
+      );
+
+      const rpRes = await fetch("https://api.razorpay.com/v1/orders", {
         method: "POST",
         headers: {
-          "Authorization": "Basic " + btoa(keySecret + ":"),
+          "Authorization": "Basic " + auth,
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
           amount: amount * 100,
-          currency: "INR"
+          currency: "INR",
+          receipt: "chai_" + Date.now()
         })
       });
 
-      const data = await orderRes.json();
+      const order = await rpRes.json();
 
-      return new Response(JSON.stringify(data), {
+      return new Response(JSON.stringify(order), {
         headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*"
         }
       });
     }
 
-    // ===== RAZORPAY WEBHOOK VERIFY =====
+    // ================= RAZORPAY WEBHOOK =================
     if (url.pathname === "/razorpay-webhook" && request.method === "POST") {
 
-      const secret = env.RAZORPAY_WEBHOOK_SECRET;
       const body = await request.text();
       const signature = request.headers.get("x-razorpay-signature");
+      const secret = env.RAZORPAY_WEBHOOK_SECRET;
 
-      // --- Web Crypto HMAC ---
       const enc = new TextEncoder();
-      const keyData = enc.encode(secret);
-
-      const cryptoKey = await crypto.subtle.importKey(
+      const key = await crypto.subtle.importKey(
         "raw",
-        keyData,
+        enc.encode(secret),
         { name: "HMAC", hash: "SHA-256" },
         false,
         ["sign"]
       );
 
-      const signatureData = await crypto.subtle.sign(
+      const hash = await crypto.subtle.sign(
         "HMAC",
-        cryptoKey,
+        key,
         enc.encode(body)
       );
 
-      const expectedSignature = Array.from(new Uint8Array(signatureData))
+      const expectedSignature = Array.from(new Uint8Array(hash))
         .map(b => b.toString(16).padStart(2, "0"))
         .join("");
 
@@ -75,9 +74,43 @@ export default {
         return new Response("Invalid signature", { status: 400 });
       }
 
-      return new Response("Payment Verified ✅");
+      const data = JSON.parse(body);
+
+      if (data.event === "payment.captured") {
+        const p = data.payload.payment.entity;
+
+        await env.DB.prepare(
+          `INSERT INTO payments 
+          (payment_id, order_id, amount, status, method)
+          VALUES (?, ?, ?, ?, ?)`
+        )
+        .bind(
+          p.id,
+          p.order_id,
+          p.amount / 100,
+          p.status,
+          p.method
+        )
+        .run();
+      }
+
+      return new Response("Webhook saved");
+    }
+
+    // ================= ADMIN PAYMENTS =================
+    if (url.pathname === "/admin/payments") {
+      const { results } = await env.DB.prepare(
+        "SELECT * FROM payments ORDER BY id DESC"
+      ).all();
+
+      return new Response(JSON.stringify(results), {
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*"
+        }
+      });
     }
 
     return new Response("Chai Hotel Backend Running 🚀");
   }
-}
+};
