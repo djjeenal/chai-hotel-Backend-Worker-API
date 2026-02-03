@@ -1,8 +1,19 @@
-name = "chai-hotel-backend"
+name = "hotel-backend"
 main = "worker.js"
 compatibility_date = "2026-01-01"
 
+# =========================
+# D1 DATABASE
+# =========================
 [[d1_databases]]
 binding = "DB"
 database_name = "chai_hotel_db"
-database_id = "243a7cbf-2596-49c0-8bec-aa403eb304c2"
+database_id = "PASTE_YOUR_REAL_DB_ID_HERE"
+
+# =========================
+# ENV SECRETS (Cloudflare Dashboard)
+# =========================
+# BREVO_API_KEY
+# RAZORPAY_KEY_ID
+# RAZORPAY_SECRET_KEY
+# RAZORPAY_WEBHOOK_SECRET
