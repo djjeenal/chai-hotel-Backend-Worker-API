@@ -1,4 +1,4 @@
-name = "chai-hotel-backend"
+name = "hotel-backend"
 main = "worker.js"
 compatibility_date = "2026-01-01"
 
