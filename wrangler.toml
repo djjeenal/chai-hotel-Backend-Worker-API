@@ -8,7 +8,7 @@ compatibility_date = "2026-01-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "chai_hotel_db"
-database_id = "PASTE_YOUR_REAL_DB_ID_HERE"
+database_id = "243a7cbf-2596-49c0-8bec-aa403eb304c2"
 
 # =========================
 # ENV SECRETS (Cloudflare Dashboard)
