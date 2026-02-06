@@ -1,46 +1,58 @@
 export default {
   async fetch(request, env) {
-    try {
-      const url = new URL(request.url);
+    const url = new URL(request.url);
 
-      if (url.pathname === "/password/send-otp" && request.method === "POST") {
+    // ✅ OTP VERIFY ROUTE
+    if (url.pathname === "/password/verify-otp" && request.method === "POST") {
+      try {
         const body = await request.json();
-        const email = body.email;
+        const { email, otp } = body;
 
-        if (!email) {
-          return new Response(
-            JSON.stringify({ success: false, message: "Email required" }),
-            { status: 400, headers: { "Content-Type": "application/json" } }
-          );
+        // 1️⃣ Validation
+        if (!email || !otp) {
+          return new Response(JSON.stringify({
+            success: false,
+            message: "Email and OTP required"
+          }), { status: 400 });
         }
 
-        // OTP generate (6 digit)
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        // 2️⃣ OTP fetch from KV
+        const stored = await env.OTP_STORE.get(email);
+        if (!stored) {
+          return new Response(JSON.stringify({
+            success: false,
+            message: "Invalid or expired OTP"
+          }), { status: 400 });
+        }
 
-        // Save OTP in KV (10 min expiry)
-        await env.OTP_STORE.put(
-          `otp:${email}`,
-          otp,
-          { expirationTtl: 600 } // 10 minutes
-        );
+        const data = JSON.parse(stored);
 
-        return new Response(
-          JSON.stringify({
-            success: true,
-            message: "OTP generated & saved ✅",
-            otp: otp   // ⚠️ test ke liye visible
-          }),
-          { headers: { "Content-Type": "application/json" } }
-        );
+        // 3️⃣ OTP match check
+        if (data.otp !== otp) {
+          return new Response(JSON.stringify({
+            success: false,
+            message: "Invalid OTP"
+          }), { status: 400 });
+        }
+
+        // 4️⃣ OTP verified → delete OTP
+        await env.OTP_STORE.delete(email);
+
+        // 5️⃣ Success
+        return new Response(JSON.stringify({
+          success: true,
+          message: "OTP verified"
+        }), { status: 200 });
+
+      } catch (err) {
+        return new Response(JSON.stringify({
+          success: false,
+          message: "Server error"
+        }), { status: 500 });
       }
-
-      return new Response("Not Found", { status: 404 });
-
-    } catch (err) {
-      return new Response(
-        JSON.stringify({ success: false, error: err.message }),
-        { status: 500, headers: { "Content-Type": "application/json" } }
-      );
     }
+
+    // ❌ Fallback
+    return new Response("Not Found", { status: 404 });
   }
 };
