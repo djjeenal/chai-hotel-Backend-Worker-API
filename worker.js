@@ -2,13 +2,30 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // ✅ OTP VERIFY ROUTE
-    if (url.pathname === "/password/verify-otp" && request.method === "POST") {
+    // ✅ Only POST allowed
+    if (request.method !== "POST") {
+      return new Response("Method Not Allowed", { status: 405 });
+    }
+
+    // =========================
+    // ✅ VERIFY OTP ROUTE
+    // =========================
+    if (url.pathname === "/password/verify-otp") {
       try {
-        const body = await request.json();
+        // ✅ Safe JSON parse
+        let body;
+        try {
+          body = await request.json();
+        } catch {
+          return new Response(JSON.stringify({
+            success: false,
+            message: "Invalid JSON body"
+          }), { status: 400 });
+        }
+
         const { email, otp } = body;
 
-        // 1️⃣ Validation
+        // ✅ Validation
         if (!email || !otp) {
           return new Response(JSON.stringify({
             success: false,
@@ -16,7 +33,7 @@ export default {
           }), { status: 400 });
         }
 
-        // 2️⃣ OTP fetch from KV
+        // ✅ Fetch OTP from KV
         const stored = await env.OTP_STORE.get(email);
         if (!stored) {
           return new Response(JSON.stringify({
@@ -27,7 +44,7 @@ export default {
 
         const data = JSON.parse(stored);
 
-        // 3️⃣ OTP match check
+        // ✅ Match OTP
         if (data.otp !== otp) {
           return new Response(JSON.stringify({
             success: false,
@@ -35,10 +52,9 @@ export default {
           }), { status: 400 });
         }
 
-        // 4️⃣ OTP verified → delete OTP
+        // ✅ Delete OTP after success
         await env.OTP_STORE.delete(email);
 
-        // 5️⃣ Success
         return new Response(JSON.stringify({
           success: true,
           message: "OTP verified"
@@ -47,7 +63,8 @@ export default {
       } catch (err) {
         return new Response(JSON.stringify({
           success: false,
-          message: "Server error"
+          message: "Server error",
+          error: err.message
         }), { status: 500 });
       }
     }
