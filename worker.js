@@ -1,101 +1,116 @@
 export default {
   async fetch(request, env) {
-    try {
-      const url = new URL(request.url);
+    const url = new URL(request.url);
 
-      // =========================
-      // SEND OTP
-      // =========================
-      if (url.pathname === "/password/send-otp" && request.method === "POST") {
+    // =========================
+    // SEND OTP
+    // =========================
+    if (url.pathname === "/password/send-otp" && request.method === "POST") {
+      try {
         const { email } = await request.json();
-
         if (!email) {
-          return new Response(JSON.stringify({
-            success: false,
-            message: "Email required"
-          }), { status: 400 });
+          return json({ success: false, message: "Email required" }, 400);
         }
 
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        const now = Date.now();
-        const expiresAt = now + 10 * 60 * 1000; // 10 minutes
+        const expiresAt = Date.now() + 10 * 60 * 1000; // 10 min
 
-        // 🔥 D1 DATABASE INSERT (IMPORTANT LINE)
         await env.DB.prepare(`
-          INSERT INTO otp_codes (email, otp, expires_at, created_at)
-          VALUES (?, ?, ?, ?)
-        `).bind(email, otp, expiresAt, now).run();
+          INSERT OR REPLACE INTO otp_codes (email, otp, expires_at)
+          VALUES (?, ?, ?)
+        `).bind(email, otp, expiresAt).run();
 
-        return new Response(JSON.stringify({
+        // 👉 Production me yahan email bhejna
+        return json({
           success: true,
-          message: "OTP generated & saved",
-          otp: otp   // ⚠️ testing ke liye, production me remove
-        }), { status: 200 });
+          message: "OTP sent to email"
+          // otp intentionally hidden
+        });
+      } catch (e) {
+        return json({ success: false, message: "Server error" }, 500);
       }
-
-      // =========================
-      // VERIFY OTP
-      // =========================
-      if (url.pathname === "/password/verify-otp" && request.method === "POST") {
-        const { email, otp } = await request.json();
-
-        if (!email || !otp) {
-          return new Response(JSON.stringify({
-            success: false,
-            message: "Email & OTP required"
-          }), { status: 400 });
-        }
-
-        // 🔥 D1 DATABASE SELECT
-        const result = await env.DB.prepare(`
-          SELECT * FROM otp_codes
-          WHERE email = ?
-          ORDER BY created_at DESC
-          LIMIT 1
-        `).bind(email).first();
-
-        if (!result) {
-          return new Response(JSON.stringify({
-            success: false,
-            message: "OTP not found"
-          }), { status: 400 });
-        }
-
-        if (result.otp !== otp) {
-          return new Response(JSON.stringify({
-            success: false,
-            message: "Invalid OTP"
-          }), { status: 400 });
-        }
-
-        if (Date.now() > result.expires_at) {
-          return new Response(JSON.stringify({
-            success: false,
-            message: "OTP expired"
-          }), { status: 400 });
-        }
-
-        // OTP used → delete
-        await env.DB.prepare(`
-          DELETE FROM otp_codes WHERE email = ?
-        `).bind(email).run();
-
-        return new Response(JSON.stringify({
-          success: true,
-          message: "OTP verified"
-        }), { status: 200 });
-      }
-
-      // =========================
-      // FALLBACK
-      // =========================
-      return new Response("Not Found", { status: 404 });
-
-    } catch (err) {
-      return new Response(JSON.stringify({
-        success: false,
-        error: err.message
-      }), { status: 500 });
     }
+
+    // =========================
+    // VERIFY OTP
+    // =========================
+    if (url.pathname === "/password/verify-otp" && request.method === "POST") {
+      try {
+        const { email, otp } = await request.json();
+        if (!email || !otp) {
+          return json({ success: false, message: "Email & OTP required" }, 400);
+        }
+
+        const row = await env.DB.prepare(
+          "SELECT otp, expires_at FROM otp_codes WHERE email = ?"
+        ).bind(email).first();
+
+        if (!row) {
+          return json({ success: false, message: "Invalid OTP" }, 400);
+        }
+
+        if (Date.now() > row.expires_at) {
+          await env.DB.prepare(
+            "DELETE FROM otp_codes WHERE email = ?"
+          ).bind(email).run();
+          return json({ success: false, message: "OTP expired" }, 400);
+        }
+
+        if (row.otp !== otp) {
+          return json({ success: false, message: "Invalid OTP" }, 400);
+        }
+
+        return json({ success: true, message: "OTP verified" });
+      } catch {
+        return json({ success: false, message: "Server error" }, 500);
+      }
+    }
+
+    // =========================
+    // RESET PASSWORD (FINAL STEP)
+    // =========================
+    if (url.pathname === "/password/reset" && request.method === "POST") {
+      try {
+        const { email, new_password } = await request.json();
+        if (!email || !new_password) {
+          return json({ success: false, message: "Email & password required" }, 400);
+        }
+
+        // 🔒 Simple hash (Cloudflare compatible)
+        const encoder = new TextEncoder();
+        const data = encoder.encode(new_password);
+        const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+        const hash = [...new Uint8Array(hashBuffer)]
+          .map(b => b.toString(16).padStart(2, "0"))
+          .join("");
+
+        await env.DB.prepare(`
+          INSERT OR REPLACE INTO users (email, password_hash, updated_at)
+          VALUES (?, ?, ?)
+        `).bind(email, hash, Date.now()).run();
+
+        // OTP cleanup
+        await env.DB.prepare(
+          "DELETE FROM otp_codes WHERE email = ?"
+        ).bind(email).run();
+
+        return json({
+          success: true,
+          message: "Password reset successful"
+        });
+      } catch {
+        return json({ success: false, message: "Server error" }, 500);
+      }
+    }
+
+    return new Response("Not Found", { status: 404 });
   }
 };
+
+// ===== Helper =====
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json" }
+  });
+}
