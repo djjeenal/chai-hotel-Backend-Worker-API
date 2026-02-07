@@ -1,92 +1,101 @@
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
+    try {
+      const url = new URL(request.url);
 
-    // ---------- SEND OTP ----------
-    if (url.pathname === "/password/send-otp" && request.method === "POST") {
-      try {
+      // =========================
+      // SEND OTP
+      // =========================
+      if (url.pathname === "/password/send-otp" && request.method === "POST") {
         const { email } = await request.json();
+
         if (!email) {
-          return json({ success: false, message: "Email required" }, 400);
+          return new Response(JSON.stringify({
+            success: false,
+            message: "Email required"
+          }), { status: 400 });
         }
 
-        // Generate OTP
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        const now = Math.floor(Date.now() / 1000);
-        const expiresAt = now + 600; // 10 minutes
+        const now = Date.now();
+        const expiresAt = now + 10 * 60 * 1000; // 10 minutes
 
-        // Delete old OTP
-        await env.DB.prepare(
-          "DELETE FROM otp_codes WHERE email = ?"
-        ).bind(email).run();
+        // 🔥 D1 DATABASE INSERT (IMPORTANT LINE)
+        await env.DB.prepare(`
+          INSERT INTO otp_codes (email, otp, expires_at, created_at)
+          VALUES (?, ?, ?, ?)
+        `).bind(email, otp, expiresAt, now).run();
 
-        // Insert new OTP
-        await env.DB.prepare(
-          "INSERT INTO otp_codes (email, otp, expires_at, created_at) VALUES (?, ?, ?, ?)"
-        ).bind(email, otp, expiresAt, now).run();
-
-        // ⚠️ YAHAN EMAIL SERVICE LAGANI HAI (Brevo)
-        // Abhi test ke liye OTP return kar rahe hain
-
-        return json({
+        return new Response(JSON.stringify({
           success: true,
-          message: "OTP generated & saved ✅",
-          otp // test ke liye
-        });
-
-      } catch (err) {
-        return json({ success: false, message: "Server error" }, 500);
+          message: "OTP generated & saved",
+          otp: otp   // ⚠️ testing ke liye, production me remove
+        }), { status: 200 });
       }
-    }
 
-    // ---------- VERIFY OTP ----------
-    if (url.pathname === "/password/verify-otp" && request.method === "POST") {
-      try {
+      // =========================
+      // VERIFY OTP
+      // =========================
+      if (url.pathname === "/password/verify-otp" && request.method === "POST") {
         const { email, otp } = await request.json();
+
         if (!email || !otp) {
-          return json({ success: false, message: "Email & OTP required" }, 400);
+          return new Response(JSON.stringify({
+            success: false,
+            message: "Email & OTP required"
+          }), { status: 400 });
         }
 
-        const now = Math.floor(Date.now() / 1000);
+        // 🔥 D1 DATABASE SELECT
+        const result = await env.DB.prepare(`
+          SELECT * FROM otp_codes
+          WHERE email = ?
+          ORDER BY created_at DESC
+          LIMIT 1
+        `).bind(email).first();
 
-        const row = await env.DB.prepare(
-          "SELECT * FROM otp_codes WHERE email = ?"
-        ).bind(email).first();
-
-        if (!row) {
-          return json({ success: false, message: "OTP not found" }, 400);
+        if (!result) {
+          return new Response(JSON.stringify({
+            success: false,
+            message: "OTP not found"
+          }), { status: 400 });
         }
 
-        if (row.otp !== otp) {
-          return json({ success: false, message: "Invalid OTP" }, 400);
+        if (result.otp !== otp) {
+          return new Response(JSON.stringify({
+            success: false,
+            message: "Invalid OTP"
+          }), { status: 400 });
         }
 
-        if (row.expires_at < now) {
-          return json({ success: false, message: "OTP expired" }, 400);
+        if (Date.now() > result.expires_at) {
+          return new Response(JSON.stringify({
+            success: false,
+            message: "OTP expired"
+          }), { status: 400 });
         }
 
-        // OTP success → delete
-        await env.DB.prepare(
-          "DELETE FROM otp_codes WHERE email = ?"
-        ).bind(email).run();
+        // OTP used → delete
+        await env.DB.prepare(`
+          DELETE FROM otp_codes WHERE email = ?
+        `).bind(email).run();
 
-        return json({
+        return new Response(JSON.stringify({
           success: true,
-          message: "OTP verified successfully ✅"
-        });
-
-      } catch (err) {
-        return json({ success: false, message: "Server error" }, 500);
+          message: "OTP verified"
+        }), { status: 200 });
       }
-    }
 
-    return new Response("Not Found", { status: 404 });
+      // =========================
+      // FALLBACK
+      // =========================
+      return new Response("Not Found", { status: 404 });
+
+    } catch (err) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: err.message
+      }), { status: 500 });
+    }
   }
 };
-
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json" }
-  });
-}
