@@ -64,3 +64,50 @@ export default {
     return new Response("Not Found", { status: 404 });
   }
 };
+// LOGIN API
+if (url.pathname === "/auth/login" && request.method === "POST") {
+  try {
+    const body = await request.json();
+    const { email, password } = body;
+
+    if (!email || !password) {
+      return new Response(JSON.stringify({
+        success: false,
+        message: "Email and password required"
+      }), { status: 400 });
+    }
+
+    const user = await env.DB
+      .prepare("SELECT * FROM users WHERE email = ?")
+      .bind(email)
+      .first();
+
+    if (!user) {
+      return new Response(JSON.stringify({
+        success: false,
+        message: "User not found"
+      }), { status: 404 });
+    }
+
+    if (user.password !== password) {
+      return new Response(JSON.stringify({
+        success: false,
+        message: "Invalid password"
+      }), { status: 401 });
+    }
+
+    return new Response(JSON.stringify({
+      success: true,
+      message: "Login successful",
+      user: {
+        email: user.email
+      }
+    }), { status: 200 });
+
+  } catch (err) {
+    return new Response(JSON.stringify({
+      success: false,
+      message: "Server error"
+    }), { status: 500 });
+  }
+}
