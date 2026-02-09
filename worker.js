@@ -2,63 +2,75 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Allow only POST
-    if (request.method !== "POST") {
+    // CORS
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type"
+        }
+      });
+    }
+
+    // SEND OTP (DEMO)
+    if (url.pathname === "/auth/send-otp") {
+      const body = await request.json();
+      const email = body.email;
+
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+      console.log(`OTP for ${email} is ${otp}`);
+
       return new Response(
-        JSON.stringify({ success: false, message: "POST method only" }),
-        { status: 405, headers: { "Content-Type": "application/json" } }
+        JSON.stringify({
+          success: true,
+          message: "OTP generated (demo mode)",
+          email,
+          otp
+        }),
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*"
+          }
+        }
       );
     }
 
-    // ===== SEND OTP =====
-    if (url.pathname === "/auth/send-otp") {
-      try {
-        const body = await request.json();
-        const email = body.email;
+    // VERIFY OTP + CREATE USER
+    if (url.pathname === "/auth/verify-otp") {
+      const body = await request.json();
+      const { email, password, otp } = body;
 
-        if (!email) {
-          return new Response(
-            JSON.stringify({ success: false, message: "Email required" }),
-            { status: 400, headers: { "Content-Type": "application/json" } }
-          );
-        }
-
-        // Generate 6-digit OTP
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
-        // (Future me yahin DB / KV me save karenge)
-        // Abhi demo ke liye response me dikha rahe hain
-
-        return new Response(
-          JSON.stringify({
-            success: true,
-            message: "OTP generated (demo mode)",
-            email: email,
-            otp: otp
-          }),
-          {
-            status: 200,
-            headers: {
-              "Content-Type": "application/json",
-              "Access-Control-Allow-Origin": "*"
-            }
-          }
-        );
-      } catch (err) {
+      if (!email || !password || !otp) {
         return new Response(
           JSON.stringify({
             success: false,
-            message: "Invalid JSON body"
+            message: "Email, password and OTP required"
           }),
           { status: 400, headers: { "Content-Type": "application/json" } }
         );
       }
+
+      await env.DB.prepare(
+        "INSERT INTO users (email, password_hash) VALUES (?, ?)"
+      ).bind(email, password).run();
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          message: "Account created successfully"
+        }),
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*"
+          }
+        }
+      );
     }
 
-    // ===== DEFAULT =====
-    return new Response(
-      JSON.stringify({ success: false, message: "Route not found" }),
-      { status: 404, headers: { "Content-Type": "application/json" } }
-    );
+    return new Response("Not Found", { status: 404 });
   }
 };
