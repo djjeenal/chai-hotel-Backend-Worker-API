@@ -51,13 +51,13 @@ export default {
 
       const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
-      await env.DB.prepare(
-        `CREATE TABLE IF NOT EXISTS otps (
+      await env.DB.prepare(`
+        CREATE TABLE IF NOT EXISTS otps (
           email TEXT PRIMARY KEY,
           otp TEXT,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`
-      ).run();
+        )
+      `).run();
 
       await env.DB.prepare(
         `INSERT OR REPLACE INTO otps (email, otp) VALUES (?, ?)`
@@ -108,7 +108,7 @@ export default {
       });
     }
 
-    // ---------- LOGIN ----------
+    // ---------- LOGIN (TOKEN ADDED) ----------
     if (path === "/auth/login" && request.method === "POST") {
       const { email, password } = await request.json();
       if (!email || !password)
@@ -124,10 +124,17 @@ export default {
       if (!user)
         return json({ success: false, message: "Invalid login" }, 401);
 
+      // ✅ TOKEN CREATE
+      const token = createToken({
+        user_id: user.id,
+        email: email
+      });
+
       return json({
         success: true,
         message: "Login successful",
-        user_id: user.id
+        user_id: user.id,
+        token: token
       });
     }
 
