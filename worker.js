@@ -1,20 +1,19 @@
-// ---------- VERIFY OTP (FIXED VERSION) ----------
+// ---------- VERIFY OTP (FINAL CLEAR VERSION) ----------
 if (path === "/auth/verify-otp" && request.method === "POST") {
   const { email, password, otp } = await request.json();
 
   if (!email || !password || !otp)
     return json({ success: false, message: "Missing data" }, 400);
 
-  // 1️⃣ OTP check
+  // OTP check
   const row = await env.DB.prepare(
     `SELECT otp FROM otps WHERE email = ?`
   ).bind(email).first();
 
-  if (!row || row.otp !== otp) {
+  if (!row || row.otp !== otp)
     return json({ success: false, message: "Invalid OTP" }, 401);
-  }
 
-  // 2️⃣ Check user already exists?
+  // Check user
   const existingUser = await env.DB.prepare(
     `SELECT id FROM users WHERE email = ?`
   ).bind(email).first();
@@ -26,11 +25,11 @@ if (path === "/auth/verify-otp" && request.method === "POST") {
 
     return json({
       success: true,
-      message: "User already exists & verified"
+      message: "User verified (already existed)"
     });
   }
 
-  // 3️⃣ New user create
+  // New user
   const hash = await hashPassword(password);
 
   await env.DB.prepare(
@@ -40,6 +39,6 @@ if (path === "/auth/verify-otp" && request.method === "POST") {
 
   return json({
     success: true,
-    message: "Account created & verified"
+    message: "New account created & verified"
   });
 }
