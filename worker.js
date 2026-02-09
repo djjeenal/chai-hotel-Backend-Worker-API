@@ -1,48 +1,73 @@
-const SECRET_KEY = "MY_SUPER_SECRET_KEY_123456";
+/****************************************************
+ * FULL AUTH SYSTEM – CLOUDFARE WORKER + D1
+ * OTP + REGISTER + LOGIN + TOKEN + AUTH/ME
+ ****************************************************/
+
+const SECRET_KEY = "THIS_IS_A_VERY_LONG_RANDOM_SECRET_KEY_987654321";
+
+/* ================= TOKEN SYSTEM ================= */
 
 function createToken(payload) {
   const data = {
-    ...payload,
+    user_id: payload.user_id,
+    email: payload.email,
     exp: Date.now() + 1000 * 60 * 60 * 24 // 24 hours
   };
-  return btoa(JSON.stringify(data) + "." + SECRET_KEY);
+
+  const tokenString = JSON.stringify(data) + "." + SECRET_KEY;
+  return btoa(tokenString);
 }
 
 function verifyToken(token) {
   try {
     const decoded = atob(token);
-    const [json, secret] = decoded.split(".");
-    if (secret !== SECRET_KEY) return null;
+    const parts = decoded.split(".");
 
-    const data = JSON.parse(json);
+    if (parts.length !== 2) return null;
+    if (parts[1] !== SECRET_KEY) return null;
+
+    const data = JSON.parse(parts[0]);
     if (Date.now() > data.exp) return null;
 
     return data;
-  } catch {
+  } catch (e) {
     return null;
   }
 }
+
+/* ================= PASSWORD HASH ================= */
+
+async function hashPassword(password) {
+  const enc = new TextEncoder().encode(password);
+  const hash = await crypto.subtle.digest("SHA-256", enc);
+  return Array.from(new Uint8Array(hash))
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/* ================= RESPONSE HELPER ================= */
+
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "*"
+    }
+  });
+}
+
+/* ================= MAIN WORKER ================= */
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
+    const method = request.method;
 
-    const json = (data, status = 200) =>
-      new Response(JSON.stringify(data), {
-        status,
-        headers: { "Content-Type": "application/json" },
-      });
+    /* ---------- AUTO CREATE TABLES ---------- */
 
-    async function hashPassword(password) {
-      const enc = new TextEncoder().encode(password);
-      const hash = await crypto.subtle.digest("SHA-256", enc);
-      return Array.from(new Uint8Array(hash))
-        .map(b => b.toString(16).padStart(2, "0"))
-        .join("");
-    }
-
-    // ✅ TABLES AUTO CREATE (VERY IMPORTANT)
     await env.DB.prepare(`
       CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,85 +80,116 @@ export default {
     await env.DB.prepare(`
       CREATE TABLE IF NOT EXISTS otps (
         email TEXT PRIMARY KEY,
-        otp TEXT
+        otp TEXT,
+        created_at INTEGER
       )
     `).run();
 
-    // ---------- SEND OTP ----------
-    if (path === "/auth/send-otp" && request.method === "POST") {
-      const { email } = await request.json();
-      if (!email) return json({ success: false, message: "Email required" }, 400);
+    /* ---------- SEND OTP ---------- */
+    if (path === "/auth/send-otp" && method === "POST") {
+      const body = await request.json();
+      const email = body.email;
+
+      if (!email) {
+        return jsonResponse({ success: false, message: "Email required" }, 400);
+      }
 
       const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
       await env.DB.prepare(
-        `INSERT OR REPLACE INTO otps (email, otp) VALUES (?, ?)`
-      ).bind(email, otp).run();
+        `INSERT OR REPLACE INTO otps (email, otp, created_at)
+         VALUES (?, ?, ?)`
+      ).bind(email, otp, Date.now()).run();
 
-      return json({
+      return jsonResponse({
         success: true,
-        message: "OTP generated (demo)",
+        message: "OTP generated (demo mode)",
         otp
       });
     }
 
-    // ---------- VERIFY OTP ----------
-    if (path === "/auth/verify-otp" && request.method === "POST") {
-      const { email, password, otp } = await request.json();
+    /* ---------- VERIFY OTP + REGISTER ---------- */
+    if (path === "/auth/verify-otp" && method === "POST") {
+      const body = await request.json();
+      const { email, password, otp } = body;
+
+      if (!email || !password || !otp) {
+        return jsonResponse({ success: false, message: "Missing fields" }, 400);
+      }
 
       const row = await env.DB.prepare(
         `SELECT otp FROM otps WHERE email = ?`
       ).bind(email).first();
 
-      if (!row || row.otp !== otp)
-        return json({ success: false, message: "Invalid OTP" }, 401);
+      if (!row || row.otp !== otp) {
+        return jsonResponse({ success: false, message: "Invalid OTP" }, 401);
+      }
 
-      const hash = await hashPassword(password);
+      const passwordHash = await hashPassword(password);
 
       await env.DB.prepare(
         `INSERT OR IGNORE INTO users (email, password_hash, is_verified)
          VALUES (?, ?, 1)`
-      ).bind(email, hash).run();
+      ).bind(email, passwordHash).run();
 
-      return json({ success: true, message: "Account verified" });
+      await env.DB.prepare(
+        `DELETE FROM otps WHERE email = ?`
+      ).bind(email).run();
+
+      return jsonResponse({
+        success: true,
+        message: "Account created & verified"
+      });
     }
 
-    // ---------- LOGIN ----------
-    if (path === "/auth/login" && request.method === "POST") {
-      const { email, password } = await request.json();
+    /* ---------- LOGIN ---------- */
+    if (path === "/auth/login" && method === "POST") {
+      const body = await request.json();
+      const { email, password } = body;
 
-      const hash = await hashPassword(password);
+      if (!email || !password) {
+        return jsonResponse({ success: false, message: "Missing credentials" }, 400);
+      }
+
+      const passwordHash = await hashPassword(password);
 
       const user = await env.DB.prepare(
-        `SELECT id FROM users
+        `SELECT id, email FROM users
          WHERE email = ? AND password_hash = ? AND is_verified = 1`
-      ).bind(email, hash).first();
+      ).bind(email, passwordHash).first();
 
-      if (!user)
-        return json({ success: false, message: "Invalid login" }, 401);
+      if (!user) {
+        return jsonResponse({ success: false, message: "Invalid login" }, 401);
+      }
 
-      const token = createToken({ user_id: user.id, email });
+      const token = createToken({
+        user_id: user.id,
+        email: user.email
+      });
 
-      return json({
+      return jsonResponse({
         success: true,
         user_id: user.id,
         token
       });
     }
 
-    // ---------- AUTH ME ----------
-    if (path === "/auth/me" && request.method === "GET") {
-      const auth = request.headers.get("Authorization");
-      if (!auth || !auth.startsWith("Bearer "))
-        return json({ success: false, message: "No token" }, 401);
+    /* ---------- AUTH ME ---------- */
+    if (path === "/auth/me" && method === "GET") {
+      const authHeader = request.headers.get("Authorization");
 
-      const token = auth.replace("Bearer ", "");
+      if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return jsonResponse({ success: false, message: "No token" }, 401);
+      }
+
+      const token = authHeader.replace("Bearer ", "");
       const data = verifyToken(token);
 
-      if (!data)
-        return json({ success: false, message: "Invalid token" }, 401);
+      if (!data) {
+        return jsonResponse({ success: false, message: "Invalid token" }, 401);
+      }
 
-      return json({
+      return jsonResponse({
         success: true,
         user: {
           id: data.user_id,
@@ -142,6 +198,7 @@ export default {
       });
     }
 
-    return json({ success: false, message: "Route not found" }, 404);
-  },
+    /* ---------- NOT FOUND ---------- */
+    return jsonResponse({ success: false, message: "Route not found" }, 404);
+  }
 };
