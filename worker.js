@@ -1,7 +1,5 @@
-// ================== CONFIG ==================
-const SECRET_KEY = "CHANGE_THIS_TO_RANDOM_STRING";
+const SECRET_KEY = "MY_SUPER_SECRET_KEY_123456";
 
-// ================== TOKEN ==================
 function createToken(payload) {
   const data = {
     ...payload,
@@ -25,7 +23,6 @@ function verifyToken(token) {
   }
 }
 
-// ================== WORKER ==================
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -45,20 +42,29 @@ export default {
         .join("");
     }
 
-    // ================== SEND OTP ==================
+    // ✅ TABLES AUTO CREATE (VERY IMPORTANT)
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT UNIQUE,
+        password_hash TEXT,
+        is_verified INTEGER
+      )
+    `).run();
+
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS otps (
+        email TEXT PRIMARY KEY,
+        otp TEXT
+      )
+    `).run();
+
+    // ---------- SEND OTP ----------
     if (path === "/auth/send-otp" && request.method === "POST") {
       const { email } = await request.json();
-      if (!email)
-        return json({ success: false, message: "Email required" }, 400);
+      if (!email) return json({ success: false, message: "Email required" }, 400);
 
       const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
-      await env.DB.prepare(`
-        CREATE TABLE IF NOT EXISTS otps (
-          email TEXT PRIMARY KEY,
-          otp TEXT
-        )
-      `).run();
 
       await env.DB.prepare(
         `INSERT OR REPLACE INTO otps (email, otp) VALUES (?, ?)`
@@ -71,11 +77,9 @@ export default {
       });
     }
 
-    // ================== VERIFY OTP ==================
+    // ---------- VERIFY OTP ----------
     if (path === "/auth/verify-otp" && request.method === "POST") {
       const { email, password, otp } = await request.json();
-      if (!email || !password || !otp)
-        return json({ success: false, message: "Missing fields" }, 400);
 
       const row = await env.DB.prepare(
         `SELECT otp FROM otps WHERE email = ?`
@@ -86,41 +90,29 @@ export default {
 
       const hash = await hashPassword(password);
 
-      await env.DB.prepare(`
-        INSERT INTO users (email, password_hash, is_verified)
-        VALUES (?, ?, 1)
-      `).bind(email, hash).run();
-
       await env.DB.prepare(
-        `DELETE FROM otps WHERE email = ?`
-      ).bind(email).run();
+        `INSERT OR IGNORE INTO users (email, password_hash, is_verified)
+         VALUES (?, ?, 1)`
+      ).bind(email, hash).run();
 
-      return json({
-        success: true,
-        message: "Account created & verified"
-      });
+      return json({ success: true, message: "Account verified" });
     }
 
-    // ================== LOGIN ==================
+    // ---------- LOGIN ----------
     if (path === "/auth/login" && request.method === "POST") {
       const { email, password } = await request.json();
-      if (!email || !password)
-        return json({ success: false, message: "Missing credentials" }, 400);
 
       const hash = await hashPassword(password);
 
-      const user = await env.DB.prepare(`
-        SELECT id FROM users
-        WHERE email = ? AND password_hash = ? AND is_verified = 1
-      `).bind(email, hash).first();
+      const user = await env.DB.prepare(
+        `SELECT id FROM users
+         WHERE email = ? AND password_hash = ? AND is_verified = 1`
+      ).bind(email, hash).first();
 
       if (!user)
         return json({ success: false, message: "Invalid login" }, 401);
 
-      const token = createToken({
-        user_id: user.id,
-        email
-      });
+      const token = createToken({ user_id: user.id, email });
 
       return json({
         success: true,
@@ -129,14 +121,13 @@ export default {
       });
     }
 
-    // ================== AUTH ME (🔥 FIXED) ==================
+    // ---------- AUTH ME ----------
     if (path === "/auth/me" && request.method === "GET") {
       const auth = request.headers.get("Authorization");
-
       if (!auth || !auth.startsWith("Bearer "))
         return json({ success: false, message: "No token" }, 401);
 
-      const token = auth.replace("Bearer ", "").trim();
+      const token = auth.replace("Bearer ", "");
       const data = verifyToken(token);
 
       if (!data)
