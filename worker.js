@@ -1,4 +1,4 @@
-// ===== TOKEN HELPERS (STEP-10.1) =====
+// ===== TOKEN HELPERS (STEP-10) =====
 const SECRET_KEY = "CHANGE_THIS_TO_RANDOM_STRING";
 
 function createToken(payload) {
@@ -29,13 +29,14 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // ---------- HELPERS ----------
+    // ---------- JSON HELPER ----------
     const json = (data, status = 200) =>
       new Response(JSON.stringify(data), {
         status,
         headers: { "Content-Type": "application/json" },
       });
 
+    // ---------- PASSWORD HASH ----------
     async function hashPassword(password) {
       const enc = new TextEncoder().encode(password);
       const hash = await crypto.subtle.digest("SHA-256", enc);
@@ -63,7 +64,6 @@ export default {
         `INSERT OR REPLACE INTO otps (email, otp) VALUES (?, ?)`
       ).bind(email, otp).run();
 
-      // DEMO MODE RESPONSE
       return json({
         success: true,
         message: "OTP generated (demo mode)",
@@ -99,8 +99,9 @@ export default {
          VALUES (?, ?, 1)`
       ).bind(email, passwordHash).run();
 
-      await env.DB.prepare(`DELETE FROM otps WHERE email = ?`)
-        .bind(email).run();
+      await env.DB.prepare(
+        `DELETE FROM otps WHERE email = ?`
+      ).bind(email).run();
 
       return json({
         success: true,
@@ -108,7 +109,7 @@ export default {
       });
     }
 
-    // ---------- LOGIN (TOKEN ADDED) ----------
+    // ---------- LOGIN + TOKEN ----------
     if (path === "/auth/login" && request.method === "POST") {
       const { email, password } = await request.json();
       if (!email || !password)
@@ -117,24 +118,44 @@ export default {
       const passwordHash = await hashPassword(password);
 
       const user = await env.DB.prepare(
-        `SELECT id FROM users
+        `SELECT id, email FROM users
          WHERE email = ? AND password_hash = ? AND is_verified = 1`
       ).bind(email, passwordHash).first();
 
       if (!user)
         return json({ success: false, message: "Invalid login" }, 401);
 
-      // ✅ TOKEN CREATE
       const token = createToken({
         user_id: user.id,
-        email: email
+        email: user.email
       });
 
       return json({
         success: true,
         message: "Login successful",
         user_id: user.id,
-        token: token
+        token
+      });
+    }
+
+    // ---------- 🔐 PROTECTED ROUTE ----------
+    if (path === "/auth/me" && request.method === "GET") {
+      const auth = request.headers.get("Authorization");
+      if (!auth || !auth.startsWith("Bearer "))
+        return json({ success: false, message: "Token missing" }, 401);
+
+      const token = auth.replace("Bearer ", "");
+      const data = verifyToken(token);
+
+      if (!data)
+        return json({ success: false, message: "Invalid or expired token" }, 401);
+
+      return json({
+        success: true,
+        user: {
+          id: data.user_id,
+          email: data.email
+        }
       });
     }
 
