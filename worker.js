@@ -1,3 +1,29 @@
+// ===== TOKEN HELPERS (STEP-10.1) =====
+const SECRET_KEY = "CHANGE_THIS_TO_RANDOM_STRING";
+
+function createToken(payload) {
+  const data = {
+    ...payload,
+    exp: Date.now() + 1000 * 60 * 60 * 24 // 24 hours
+  };
+  return btoa(JSON.stringify(data) + "." + SECRET_KEY);
+}
+
+function verifyToken(token) {
+  try {
+    const decoded = atob(token);
+    const [json, secret] = decoded.split(".");
+    if (secret !== SECRET_KEY) return null;
+
+    const data = JSON.parse(json);
+    if (Date.now() > data.exp) return null;
+
+    return data;
+  } catch {
+    return null;
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
