@@ -1,73 +1,48 @@
-/****************************************************
- * FULL AUTH SYSTEM – CLOUDFARE WORKER + D1
- * OTP + REGISTER + LOGIN + TOKEN + AUTH/ME
- ****************************************************/
-
-const SECRET_KEY = "THIS_IS_A_VERY_LONG_RANDOM_SECRET_KEY_987654321";
-
-/* ================= TOKEN SYSTEM ================= */
+const SECRET_KEY = "MY_SUPER_SECRET_KEY_123456";
 
 function createToken(payload) {
   const data = {
-    user_id: payload.user_id,
-    email: payload.email,
+    ...payload,
     exp: Date.now() + 1000 * 60 * 60 * 24 // 24 hours
   };
-
-  const tokenString = JSON.stringify(data) + "." + SECRET_KEY;
-  return btoa(tokenString);
+  return btoa(JSON.stringify(data) + "." + SECRET_KEY);
 }
 
 function verifyToken(token) {
   try {
     const decoded = atob(token);
-    const parts = decoded.split(".");
+    const [json, secret] = decoded.split(".");
+    if (secret !== SECRET_KEY) return null;
 
-    if (parts.length !== 2) return null;
-    if (parts[1] !== SECRET_KEY) return null;
-
-    const data = JSON.parse(parts[0]);
+    const data = JSON.parse(json);
     if (Date.now() > data.exp) return null;
 
     return data;
-  } catch (e) {
+  } catch {
     return null;
   }
 }
-
-/* ================= PASSWORD HASH ================= */
-
-async function hashPassword(password) {
-  const enc = new TextEncoder().encode(password);
-  const hash = await crypto.subtle.digest("SHA-256", enc);
-  return Array.from(new Uint8Array(hash))
-    .map(b => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-/* ================= RESPONSE HELPER ================= */
-
-function jsonResponse(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "*"
-    }
-  });
-}
-
-/* ================= MAIN WORKER ================= */
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
-    const method = request.method;
 
-    /* ---------- AUTO CREATE TABLES ---------- */
+    const json = (data, status = 200) =>
+      new Response(JSON.stringify(data), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
 
+    async function hashPassword(password) {
+      const enc = new TextEncoder().encode(password);
+      const hash = await crypto.subtle.digest("SHA-256", enc);
+      return Array.from(new Uint8Array(hash))
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join("");
+    }
+
+    // ✅ TABLES AUTO CREATE (VERY IMPORTANT)
     await env.DB.prepare(`
       CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,116 +55,85 @@ export default {
     await env.DB.prepare(`
       CREATE TABLE IF NOT EXISTS otps (
         email TEXT PRIMARY KEY,
-        otp TEXT,
-        created_at INTEGER
+        otp TEXT
       )
     `).run();
 
-    /* ---------- SEND OTP ---------- */
-    if (path === "/auth/send-otp" && method === "POST") {
-      const body = await request.json();
-      const email = body.email;
-
-      if (!email) {
-        return jsonResponse({ success: false, message: "Email required" }, 400);
-      }
+    // ---------- SEND OTP ----------
+    if (path === "/auth/send-otp" && request.method === "POST") {
+      const { email } = await request.json();
+      if (!email) return json({ success: false, message: "Email required" }, 400);
 
       const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
       await env.DB.prepare(
-        `INSERT OR REPLACE INTO otps (email, otp, created_at)
-         VALUES (?, ?, ?)`
-      ).bind(email, otp, Date.now()).run();
+        `INSERT OR REPLACE INTO otps (email, otp) VALUES (?, ?)`
+      ).bind(email, otp).run();
 
-      return jsonResponse({
+      return json({
         success: true,
-        message: "OTP generated (demo mode)",
+        message: "OTP generated (demo)",
         otp
       });
     }
 
-    /* ---------- VERIFY OTP + REGISTER ---------- */
-    if (path === "/auth/verify-otp" && method === "POST") {
-      const body = await request.json();
-      const { email, password, otp } = body;
-
-      if (!email || !password || !otp) {
-        return jsonResponse({ success: false, message: "Missing fields" }, 400);
-      }
+    // ---------- VERIFY OTP ----------
+    if (path === "/auth/verify-otp" && request.method === "POST") {
+      const { email, password, otp } = await request.json();
 
       const row = await env.DB.prepare(
         `SELECT otp FROM otps WHERE email = ?`
       ).bind(email).first();
 
-      if (!row || row.otp !== otp) {
-        return jsonResponse({ success: false, message: "Invalid OTP" }, 401);
-      }
+      if (!row || row.otp !== otp)
+        return json({ success: false, message: "Invalid OTP" }, 401);
 
-      const passwordHash = await hashPassword(password);
+      const hash = await hashPassword(password);
 
       await env.DB.prepare(
         `INSERT OR IGNORE INTO users (email, password_hash, is_verified)
          VALUES (?, ?, 1)`
-      ).bind(email, passwordHash).run();
+      ).bind(email, hash).run();
 
-      await env.DB.prepare(
-        `DELETE FROM otps WHERE email = ?`
-      ).bind(email).run();
-
-      return jsonResponse({
-        success: true,
-        message: "Account created & verified"
-      });
+      return json({ success: true, message: "Account verified" });
     }
 
-    /* ---------- LOGIN ---------- */
-    if (path === "/auth/login" && method === "POST") {
-      const body = await request.json();
-      const { email, password } = body;
+    // ---------- LOGIN ----------
+    if (path === "/auth/login" && request.method === "POST") {
+      const { email, password } = await request.json();
 
-      if (!email || !password) {
-        return jsonResponse({ success: false, message: "Missing credentials" }, 400);
-      }
-
-      const passwordHash = await hashPassword(password);
+      const hash = await hashPassword(password);
 
       const user = await env.DB.prepare(
-        `SELECT id, email FROM users
+        `SELECT id FROM users
          WHERE email = ? AND password_hash = ? AND is_verified = 1`
-      ).bind(email, passwordHash).first();
+      ).bind(email, hash).first();
 
-      if (!user) {
-        return jsonResponse({ success: false, message: "Invalid login" }, 401);
-      }
+      if (!user)
+        return json({ success: false, message: "Invalid login" }, 401);
 
-      const token = createToken({
-        user_id: user.id,
-        email: user.email
-      });
+      const token = createToken({ user_id: user.id, email });
 
-      return jsonResponse({
+      return json({
         success: true,
         user_id: user.id,
         token
       });
     }
 
-    /* ---------- AUTH ME ---------- */
-    if (path === "/auth/me" && method === "GET") {
-      const authHeader = request.headers.get("Authorization");
+    // ---------- AUTH ME ----------
+    if (path === "/auth/me" && request.method === "GET") {
+      const auth = request.headers.get("Authorization");
+      if (!auth || !auth.startsWith("Bearer "))
+        return json({ success: false, message: "No token" }, 401);
 
-      if (!authHeader || !authHeader.startsWith("Bearer ")) {
-        return jsonResponse({ success: false, message: "No token" }, 401);
-      }
-
-      const token = authHeader.replace("Bearer ", "");
+      const token = auth.replace("Bearer ", "");
       const data = verifyToken(token);
 
-      if (!data) {
-        return jsonResponse({ success: false, message: "Invalid token" }, 401);
-      }
+      if (!data)
+        return json({ success: false, message: "Invalid token" }, 401);
 
-      return jsonResponse({
+      return json({
         success: true,
         user: {
           id: data.user_id,
@@ -198,7 +142,6 @@ export default {
       });
     }
 
-    /* ---------- NOT FOUND ---------- */
-    return jsonResponse({ success: false, message: "Route not found" }, 404);
-  }
+    return json({ success: false, message: "Route not found" }, 404);
+  },
 };
