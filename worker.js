@@ -1,4 +1,3 @@
-// ===== TOKEN HELPERS (STEP-10) =====
 const SECRET_KEY = "CHANGE_THIS_TO_RANDOM_STRING";
 
 function createToken(payload) {
@@ -29,14 +28,12 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // ---------- JSON HELPER ----------
     const json = (data, status = 200) =>
       new Response(JSON.stringify(data), {
         status,
         headers: { "Content-Type": "application/json" },
       });
 
-    // ---------- PASSWORD HASH ----------
     async function hashPassword(password) {
       const enc = new TextEncoder().encode(password);
       const hash = await crypto.subtle.digest("SHA-256", enc);
@@ -48,15 +45,14 @@ export default {
     // ---------- SEND OTP ----------
     if (path === "/auth/send-otp" && request.method === "POST") {
       const { email } = await request.json();
-      if (!email) return json({ success: false, message: "Email required" }, 400);
+      if (!email) return json({ success: false }, 400);
 
       const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
       await env.DB.prepare(`
         CREATE TABLE IF NOT EXISTS otps (
           email TEXT PRIMARY KEY,
-          otp TEXT,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          otp TEXT
         )
       `).run();
 
@@ -64,91 +60,62 @@ export default {
         `INSERT OR REPLACE INTO otps (email, otp) VALUES (?, ?)`
       ).bind(email, otp).run();
 
-      return json({
-        success: true,
-        message: "OTP generated (demo mode)",
-        email,
-        otp
-      });
+      return json({ success: true, otp });
     }
 
-    // ---------- VERIFY OTP + CREATE ACCOUNT ----------
+    // ---------- VERIFY OTP ----------
     if (path === "/auth/verify-otp" && request.method === "POST") {
       const { email, password, otp } = await request.json();
-      if (!email || !password || !otp)
-        return json({ success: false, message: "Missing fields" }, 400);
 
-      const savedOtp = await env.DB.prepare(
+      const row = await env.DB.prepare(
         `SELECT otp FROM otps WHERE email = ?`
       ).bind(email).first();
 
-      if (!savedOtp || savedOtp.otp !== otp)
-        return json({ success: false, message: "Invalid OTP" }, 401);
+      if (!row || row.otp !== otp)
+        return json({ success: false }, 401);
 
-      const existing = await env.DB.prepare(
-        `SELECT id FROM users WHERE email = ?`
-      ).bind(email).first();
+      const hash = await hashPassword(password);
 
-      if (existing)
-        return json({ success: false, message: "Email already registered" }, 409);
+      await env.DB.prepare(`
+        INSERT INTO users (email, password_hash, is_verified)
+        VALUES (?, ?, 1)
+      `).bind(email, hash).run();
 
-      const passwordHash = await hashPassword(password);
-
-      await env.DB.prepare(
-        `INSERT INTO users (email, password_hash, is_verified)
-         VALUES (?, ?, 1)`
-      ).bind(email, passwordHash).run();
-
-      await env.DB.prepare(
-        `DELETE FROM otps WHERE email = ?`
-      ).bind(email).run();
-
-      return json({
-        success: true,
-        message: "Account created & verified successfully"
-      });
+      return json({ success: true });
     }
 
-    // ---------- LOGIN + TOKEN ----------
+    // ---------- LOGIN ----------
     if (path === "/auth/login" && request.method === "POST") {
       const { email, password } = await request.json();
-      if (!email || !password)
-        return json({ success: false, message: "Missing credentials" }, 400);
+      const hash = await hashPassword(password);
 
-      const passwordHash = await hashPassword(password);
+      const user = await env.DB.prepare(`
+        SELECT id FROM users
+        WHERE email = ? AND password_hash = ? AND is_verified = 1
+      `).bind(email, hash).first();
 
-      const user = await env.DB.prepare(
-        `SELECT id, email FROM users
-         WHERE email = ? AND password_hash = ? AND is_verified = 1`
-      ).bind(email, passwordHash).first();
+      if (!user) return json({ success: false }, 401);
 
-      if (!user)
-        return json({ success: false, message: "Invalid login" }, 401);
-
-      const token = createToken({
-        user_id: user.id,
-        email: user.email
-      });
+      const token = createToken({ user_id: user.id, email });
 
       return json({
         success: true,
-        message: "Login successful",
         user_id: user.id,
         token
       });
     }
 
-    // ---------- 🔐 PROTECTED ROUTE ----------
+    // ---------- AUTH ME (🔥 MISSING PART) ----------
     if (path === "/auth/me" && request.method === "GET") {
       const auth = request.headers.get("Authorization");
       if (!auth || !auth.startsWith("Bearer "))
-        return json({ success: false, message: "Token missing" }, 401);
+        return json({ success: false }, 401);
 
       const token = auth.replace("Bearer ", "");
       const data = verifyToken(token);
 
       if (!data)
-        return json({ success: false, message: "Invalid or expired token" }, 401);
+        return json({ success: false }, 401);
 
       return json({
         success: true,
