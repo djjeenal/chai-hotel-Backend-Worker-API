@@ -1,85 +1,64 @@
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const path = url.pathname;
 
-    // -------- SEND OTP --------
-    if (path === "/auth/send-otp" && request.method === "POST") {
-      const { email } = await request.json();
-      if (!email) {
-        return json({ success: false, message: "Email required" }, 400);
-      }
-
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      const expires = Date.now() + 10 * 60 * 1000; // 10 minutes
-
-      globalThis.OTP_STORE = globalThis.OTP_STORE || {};
-      globalThis.OTP_STORE[email] = { otp, expires };
-
-      console.log(`OTP for ${email} is ${otp}`);
-
-      return json({
-        success: true,
-        message: "OTP generated (check Worker logs)",
-      });
+    // Allow only POST
+    if (request.method !== "POST") {
+      return new Response(
+        JSON.stringify({ success: false, message: "POST method only" }),
+        { status: 405, headers: { "Content-Type": "application/json" } }
+      );
     }
 
-    // -------- VERIFY OTP + CREATE USER --------
-    if (path === "/auth/verify-otp" && request.method === "POST") {
-      const { email, password, otp } = await request.json();
-
-      if (!email || !password || !otp) {
-        return json({ success: false, message: "All fields required" }, 400);
-      }
-
-      const record = globalThis.OTP_STORE?.[email];
-      if (!record) {
-        return json({ success: false, message: "OTP not found" }, 400);
-      }
-
-      if (Date.now() > record.expires) {
-        delete globalThis.OTP_STORE[email];
-        return json({ success: false, message: "OTP expired" }, 400);
-      }
-
-      if (record.otp !== otp) {
-        return json({ success: false, message: "Invalid OTP" }, 400);
-      }
-
-      // hash password
-      const encoder = new TextEncoder();
-      const data = encoder.encode(password);
-      const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-      const hashArray = Array.from(new Uint8Array(hashBuffer));
-      const password_hash = hashArray
-        .map(b => b.toString(16).padStart(2, "0"))
-        .join("");
-
+    // ===== SEND OTP =====
+    if (url.pathname === "/auth/send-otp") {
       try {
-        await env.DB.prepare(
-          "INSERT INTO users (email, password_hash) VALUES (?, ?)"
-        )
-          .bind(email, password_hash)
-          .run();
-      } catch (e) {
-        return json({ success: false, message: "User already exists" }, 400);
+        const body = await request.json();
+        const email = body.email;
+
+        if (!email) {
+          return new Response(
+            JSON.stringify({ success: false, message: "Email required" }),
+            { status: 400, headers: { "Content-Type": "application/json" } }
+          );
+        }
+
+        // Generate 6-digit OTP
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+        // (Future me yahin DB / KV me save karenge)
+        // Abhi demo ke liye response me dikha rahe hain
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            message: "OTP generated (demo mode)",
+            email: email,
+            otp: otp
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "Access-Control-Allow-Origin": "*"
+            }
+          }
+        );
+      } catch (err) {
+        return new Response(
+          JSON.stringify({
+            success: false,
+            message: "Invalid JSON body"
+          }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        );
       }
-
-      delete globalThis.OTP_STORE[email];
-
-      return json({
-        success: true,
-        message: "Account created successfully",
-      });
     }
 
-    return json({ success: false, message: "Not found" }, 404);
-  },
+    // ===== DEFAULT =====
+    return new Response(
+      JSON.stringify({ success: false, message: "Route not found" }),
+      { status: 404, headers: { "Content-Type": "application/json" } }
+    );
+  }
 };
-
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
