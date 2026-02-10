@@ -1,72 +1,136 @@
-// ---------- AUTH ME (FINAL WORKING VERSION) ----------
-if (path === "/auth/me" && request.method === "GET") {
-  const auth = request.headers.get("Authorization");
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const path = url.pathname;
 
-  if (!auth || !auth.startsWith("Bearer ")) {
-    return json(
-      { success: false, message: "Missing Authorization header" },
-      401
-    );
-  }
+    const json = (data, status = 200) =>
+      new Response(JSON.stringify(data), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
 
-  try {
-    // 1️⃣ Bearer hatao
-    const token = auth.replace("Bearer ", "").trim();
-
-    // 2️⃣ Token split karo (payload.secret)
-    const parts = token.split(".");
-    if (parts.length !== 2) {
-      return json(
-        { success: false, message: "Invalid token format" },
-        401
-      );
+    // ------------------ UTILS ------------------
+    async function hashPassword(password) {
+      const enc = new TextEncoder().encode(password);
+      const hash = await crypto.subtle.digest("SHA-256", enc);
+      return Array.from(new Uint8Array(hash))
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join("");
     }
 
-    const payloadBase64 = parts[0];
-    const secret = parts[1];
-
-    // 3️⃣ Secret verify
-    if (secret !== env.JWT_SECRET) {
-      return json(
-        { success: false, message: "Invalid token secret" },
-        401
-      );
+    function createToken(payload) {
+      const data = {
+        ...payload,
+        exp: Date.now() + 1000 * 60 * 60 * 24 // 24h
+      };
+      return btoa(JSON.stringify(data) + "." + env.JWT_SECRET);
     }
 
-    // 4️⃣ Payload decode
-    const payloadJson = atob(payloadBase64);
-    const payload = JSON.parse(payloadJson);
+    function verifyToken(token) {
+      try {
+        const decoded = atob(token);
+        const [jsonData, secret] = decoded.split(".");
+        if (secret !== env.JWT_SECRET) return null;
 
-    // 5️⃣ Expiry check (IMPORTANT)
-    if (Date.now() > payload.exp) {
-      return json(
-        { success: false, message: "Token expired" },
-        401
-      );
+        const data = JSON.parse(jsonData);
+        if (Date.now() > data.exp) return null;
+
+        return data;
+      } catch {
+        return null;
+      }
     }
 
-    // 6️⃣ User fetch from DB
-    const user = await env.DB.prepare(
-      `SELECT id, email FROM users WHERE id = ?`
-    ).bind(payload.user_id).first();
+    // ------------------ SEND OTP ------------------
+    if (path === "/auth/send-otp" && request.method === "POST") {
+      const { email } = await request.json();
+      if (!email) return json({ success: false }, 400);
 
-    if (!user) {
-      return json(
-        { success: false, message: "User not found" },
-        401
-      );
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+      await env.DB.prepare(`
+        CREATE TABLE IF NOT EXISTS otps (
+          email TEXT PRIMARY KEY,
+          otp TEXT
+        )
+      `).run();
+
+      await env.DB.prepare(
+        `INSERT OR REPLACE INTO otps (email, otp) VALUES (?, ?)`
+      ).bind(email, otp).run();
+
+      return json({ success: true, message: "OTP generated (demo)", otp });
     }
 
-    // ✅ SUCCESS
-    return json({
-      success: true,
-      user
-    });
+    // ------------------ VERIFY OTP ------------------
+    if (path === "/auth/verify-otp" && request.method === "POST") {
+      const { email, password, otp } = await request.json();
+      if (!email || !password || !otp)
+        return json({ success: false, message: "Missing data" }, 400);
 
-  } catch (err) {
-    return json(
-      { success: false, message: "Token decode failed" },
-      401
-    );
-  }
-}
+      const row = await env.DB.prepare(
+        `SELECT otp FROM otps WHERE email = ?`
+      ).bind(email).first();
+
+      if (!row || row.otp !== otp)
+        return json({ success: false, message: "Invalid OTP" }, 401);
+
+      const existingUser = await env.DB.prepare(
+        `SELECT id FROM users WHERE email = ?`
+      ).bind(email).first();
+
+      if (existingUser) {
+        await env.DB.prepare(
+          `UPDATE users SET is_verified = 1 WHERE email = ?`
+        ).bind(email).run();
+      } else {
+        const hash = await hashPassword(password);
+        await env.DB.prepare(
+          `INSERT INTO users (email, password_hash, is_verified)
+           VALUES (?, ?, 1)`
+        ).bind(email, hash).run();
+      }
+
+      await env.DB.prepare(
+        `DELETE FROM otps WHERE email = ?`
+      ).bind(email).run();
+
+      return json({ success: true, message: "Account created & verified" });
+    }
+
+    // ------------------ LOGIN ------------------
+    if (path === "/auth/login" && request.method === "POST") {
+      const { email, password } = await request.json();
+      const hash = await hashPassword(password);
+
+      const user = await env.DB.prepare(`
+        SELECT id FROM users
+        WHERE email = ? AND password_hash = ? AND is_verified = 1
+      `).bind(email, hash).first();
+
+      if (!user) return json({ success: false }, 401);
+
+      const token = createToken({ user_id: user.id, email });
+
+      return json({ success: true, user_id: user.id, token });
+    }
+
+    // ------------------ AUTH ME ------------------
+    if (path === "/auth/me" && request.method === "GET") {
+      const auth = request.headers.get("Authorization");
+      if (!auth || !auth.startsWith("Bearer "))
+        return json({ success: false }, 401);
+
+      const token = auth.replace("Bearer ", "");
+      const data = verifyToken(token);
+      if (!data) return json({ success: false }, 401);
+
+      return json({
+        success: true,
+        user: { id: data.user_id, email: data.email }
+      });
+    }
+
+    return json({ success: false, message: "Route not found" }, 404);
+  },
+};
