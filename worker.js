@@ -9,35 +9,38 @@ export default {
         headers: { "Content-Type": "application/json" },
       });
 
-    // ---------- PASSWORD HASH ----------
+    // 🔐 TOKEN CREATE
+    function createToken(payload) {
+      const data = {
+        ...payload,
+        exp: Date.now() + 1000 * 60 * 60 * 24, // 24 hours
+      };
+      return btoa(JSON.stringify(data) + "." + env.JWT_SECRET);
+    }
+
+    // 🔓 TOKEN VERIFY
+    function verifyToken(token) {
+      try {
+        const decoded = atob(token);
+        const [jsonData, secret] = decoded.split(".");
+
+        if (secret !== env.JWT_SECRET) return null;
+
+        const data = JSON.parse(jsonData);
+        if (Date.now() > data.exp) return null;
+
+        return data;
+      } catch {
+        return null;
+      }
+    }
+
     async function hashPassword(password) {
       const enc = new TextEncoder().encode(password);
       const hash = await crypto.subtle.digest("SHA-256", enc);
       return Array.from(new Uint8Array(hash))
         .map(b => b.toString(16).padStart(2, "0"))
         .join("");
-    }
-
-    // ---------- TOKEN ----------
-    function createToken(payload) {
-      const data = {
-        ...payload,
-        exp: Date.now() + 1000 * 60 * 60 * 24,
-      };
-      return btoa(JSON.stringify(data) + "." + env.JWT_SECRET);
-    }
-
-    function verifyToken(token) {
-      try {
-        const decoded = atob(token);
-        const [jsonData, secret] = decoded.split(".");
-        if (secret !== env.JWT_SECRET) return null;
-        const data = JSON.parse(jsonData);
-        if (Date.now() > data.exp) return null;
-        return data;
-      } catch {
-        return null;
-      }
     }
 
     // ---------- SEND OTP ----------
@@ -72,21 +75,12 @@ export default {
       if (!row || row.otp !== otp)
         return json({ success: false }, 401);
 
-      const existing = await env.DB.prepare(
-        `SELECT id FROM users WHERE email = ?`
-      ).bind(email).first();
-
-      if (!existing) {
-        const hash = await hashPassword(password);
-        await env.DB.prepare(
-          `INSERT INTO users (email, password_hash, is_verified)
-           VALUES (?, ?, 1)`
-        ).bind(email, hash).run();
-      }
+      const hash = await hashPassword(password);
 
       await env.DB.prepare(
-        `DELETE FROM otps WHERE email = ?`
-      ).bind(email).run();
+        `INSERT OR REPLACE INTO users (email, password_hash, is_verified)
+         VALUES (?, ?, 1)`
+      ).bind(email, hash).run();
 
       return json({ success: true });
     }
@@ -97,12 +91,14 @@ export default {
       const hash = await hashPassword(password);
 
       const user = await env.DB.prepare(
-        `SELECT id FROM users WHERE email=? AND password_hash=? AND is_verified=1`
+        `SELECT rowid as id FROM users
+         WHERE email = ? AND password_hash = ? AND is_verified = 1`
       ).bind(email, hash).first();
 
       if (!user) return json({ success: false }, 401);
 
       const token = createToken({ user_id: user.id, email });
+
       return json({ success: true, token });
     }
 
@@ -114,11 +110,18 @@ export default {
 
       const token = auth.replace("Bearer ", "");
       const data = verifyToken(token);
+
       if (!data) return json({ success: false }, 401);
 
-      return json({ success: true, user: data });
+      return json({
+        success: true,
+        user: {
+          id: data.user_id,
+          email: data.email,
+        },
+      });
     }
 
-    return json({ message: "Not found" }, 404);
+    return json({ success: false, message: "Not found" }, 404);
   },
 };
