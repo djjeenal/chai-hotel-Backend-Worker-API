@@ -9,7 +9,7 @@ export default {
         headers: { "Content-Type": "application/json" },
       });
 
-    // ------------------ UTILS ------------------
+    // ---------- PASSWORD HASH ----------
     async function hashPassword(password) {
       const enc = new TextEncoder().encode(password);
       const hash = await crypto.subtle.digest("SHA-256", enc);
@@ -18,10 +18,11 @@ export default {
         .join("");
     }
 
+    // ---------- TOKEN ----------
     function createToken(payload) {
       const data = {
         ...payload,
-        exp: Date.now() + 1000 * 60 * 60 * 24 // 24h
+        exp: Date.now() + 1000 * 60 * 60 * 24,
       };
       return btoa(JSON.stringify(data) + "." + env.JWT_SECRET);
     }
@@ -31,17 +32,15 @@ export default {
         const decoded = atob(token);
         const [jsonData, secret] = decoded.split(".");
         if (secret !== env.JWT_SECRET) return null;
-
         const data = JSON.parse(jsonData);
         if (Date.now() > data.exp) return null;
-
         return data;
       } catch {
         return null;
       }
     }
 
-    // ------------------ SEND OTP ------------------
+    // ---------- SEND OTP ----------
     if (path === "/auth/send-otp" && request.method === "POST") {
       const { email } = await request.json();
       if (!email) return json({ success: false }, 400);
@@ -59,31 +58,25 @@ export default {
         `INSERT OR REPLACE INTO otps (email, otp) VALUES (?, ?)`
       ).bind(email, otp).run();
 
-      return json({ success: true, message: "OTP generated (demo)", otp });
+      return json({ success: true, otp });
     }
 
-    // ------------------ VERIFY OTP ------------------
+    // ---------- VERIFY OTP ----------
     if (path === "/auth/verify-otp" && request.method === "POST") {
       const { email, password, otp } = await request.json();
-      if (!email || !password || !otp)
-        return json({ success: false, message: "Missing data" }, 400);
 
       const row = await env.DB.prepare(
         `SELECT otp FROM otps WHERE email = ?`
       ).bind(email).first();
 
       if (!row || row.otp !== otp)
-        return json({ success: false, message: "Invalid OTP" }, 401);
+        return json({ success: false }, 401);
 
-      const existingUser = await env.DB.prepare(
+      const existing = await env.DB.prepare(
         `SELECT id FROM users WHERE email = ?`
       ).bind(email).first();
 
-      if (existingUser) {
-        await env.DB.prepare(
-          `UPDATE users SET is_verified = 1 WHERE email = ?`
-        ).bind(email).run();
-      } else {
+      if (!existing) {
         const hash = await hashPassword(password);
         await env.DB.prepare(
           `INSERT INTO users (email, password_hash, is_verified)
@@ -95,27 +88,25 @@ export default {
         `DELETE FROM otps WHERE email = ?`
       ).bind(email).run();
 
-      return json({ success: true, message: "Account created & verified" });
+      return json({ success: true });
     }
 
-    // ------------------ LOGIN ------------------
+    // ---------- LOGIN ----------
     if (path === "/auth/login" && request.method === "POST") {
       const { email, password } = await request.json();
       const hash = await hashPassword(password);
 
-      const user = await env.DB.prepare(`
-        SELECT id FROM users
-        WHERE email = ? AND password_hash = ? AND is_verified = 1
-      `).bind(email, hash).first();
+      const user = await env.DB.prepare(
+        `SELECT id FROM users WHERE email=? AND password_hash=? AND is_verified=1`
+      ).bind(email, hash).first();
 
       if (!user) return json({ success: false }, 401);
 
       const token = createToken({ user_id: user.id, email });
-
-      return json({ success: true, user_id: user.id, token });
+      return json({ success: true, token });
     }
 
-    // ------------------ AUTH ME ------------------
+    // ---------- AUTH ME ----------
     if (path === "/auth/me" && request.method === "GET") {
       const auth = request.headers.get("Authorization");
       if (!auth || !auth.startsWith("Bearer "))
@@ -125,12 +116,9 @@ export default {
       const data = verifyToken(token);
       if (!data) return json({ success: false }, 401);
 
-      return json({
-        success: true,
-        user: { id: data.user_id, email: data.email }
-      });
+      return json({ success: true, user: data });
     }
 
-    return json({ success: false, message: "Route not found" }, 404);
+    return json({ message: "Not found" }, 404);
   },
 };
