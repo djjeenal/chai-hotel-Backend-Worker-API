@@ -140,65 +140,34 @@ export default {
     // VERIFY OTP + CREATE ACCOUNT
     // =========================
     if (path === "/auth/verify-otp" && request.method === "POST") {
-      try {
-        const { email, password, otp } = await request.json();
+  try {
+    const body = await request.json();
 
-        if (!email || !password || !otp)
-          return json({ success: false, message: "Missing fields" }, 400);
+    const email = (body.email || "").trim();
+    const otp = (body.otp || "").toString().trim();
 
-        const record = await env.DB.prepare(
-          `SELECT otp, expires_at FROM otp_codes WHERE email = ?`
-        )
-          .bind(email)
-          .first();
+    const record = await env.DB.prepare(
+      `SELECT otp, expires_at FROM otp_codes WHERE email = ?`
+    )
+      .bind(email)
+      .first();
 
-        if (!record)
-          return json({ success: false, message: "No OTP found" }, 400);
+    if (!record)
+      return json({ success: false, message: "No OTP found" }, 400);
 
-        if (record.otp !== otp)
-          return json({ success: false, message: "Wrong OTP" }, 400);
+    const dbOtp = (record.otp || "").toString().trim();
 
-        if (Date.now() > record.expires_at)
-          return json({ success: false, message: "OTP expired" }, 400);
+    if (dbOtp !== otp)
+      return json({ success: false, message: "Wrong OTP" }, 400);
 
-        const existingUser = await env.DB.prepare(
-          `SELECT id FROM users WHERE email = ?`
-        )
-          .bind(email)
-          .first();
+    if (Date.now() > Number(record.expires_at))
+      return json({ success: false, message: "OTP expired" }, 400);
 
-        if (existingUser) {
-          await env.DB.prepare(
-            `UPDATE users SET is_verified = 1 WHERE email = ?`
-          )
-            .bind(email)
-            .run();
-
-          return json({
-            success: true,
-            message: "Account verified. Please login.",
-          });
-        }
-
-        await env.DB.prepare(
-          `INSERT INTO users (email, password_hash, is_verified, created_at)
-           VALUES (?, ?, 1, ?)`
-        )
-          .bind(email, password, new Date().toISOString())
-          .run();
-
-        await env.DB.prepare(`DELETE FROM otp_codes WHERE email = ?`)
-          .bind(email)
-          .run();
-
-        return json({
-          success: true,
-          message: "Account created successfully",
-        });
-      } catch (e) {
-        return json({ success: false, error: e.message }, 500);
-      }
-    }
+    return json({ success: true, message: "OTP verified" });
+  } catch (e) {
+    return json({ success: false, error: e.message }, 500);
+  }
+}
 
     // =========================
     // AUTH ME (TOKEN CHECK)
