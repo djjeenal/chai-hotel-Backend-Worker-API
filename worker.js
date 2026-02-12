@@ -9,10 +9,8 @@ export default {
         headers: { "Content-Type": "application/json" },
       });
 
-    // Helper → Generate Token (simple)
-    const makeToken = (payload) => {
-      return btoa(JSON.stringify(payload));
-    };
+    // ===== TOKEN HELPERS =====
+    const makeToken = (payload) => btoa(JSON.stringify(payload));
 
     const readToken = (token) => {
       try {
@@ -23,7 +21,7 @@ export default {
     };
 
     // =========================
-    // REGISTER ✅
+    // REGISTER (EMAIL + PASSWORD)
     // =========================
     if (path === "/auth/register" && request.method === "POST") {
       try {
@@ -32,6 +30,18 @@ export default {
         if (!email || !password)
           return json({ success: false, message: "Missing fields" }, 400);
 
+        const existingUser = await env.DB.prepare(
+          `SELECT id FROM users WHERE email = ?`
+        )
+          .bind(email)
+          .first();
+
+        if (existingUser)
+          return json({
+            success: false,
+            message: "Account already exists. Please login.",
+          });
+
         await env.DB.prepare(
           `INSERT INTO users (email, password_hash, is_verified, created_at)
            VALUES (?, ?, 1, ?)`
@@ -39,18 +49,21 @@ export default {
           .bind(email, password, new Date().toISOString())
           .run();
 
-        return json({ success: true });
+        return json({ success: true, message: "Account created" });
       } catch (e) {
         return json({ success: false, error: e.message }, 500);
       }
     }
 
     // =========================
-    // LOGIN ✅
+    // LOGIN
     // =========================
     if (path === "/auth/login" && request.method === "POST") {
       try {
         const { email, password } = await request.json();
+
+        if (!email || !password)
+          return json({ success: false, message: "Missing fields" }, 400);
 
         const user = await env.DB.prepare(
           `SELECT id FROM users WHERE email = ? AND password_hash = ?`
@@ -69,14 +82,18 @@ export default {
 
         const token = makeToken(payload);
 
-        return json({ success: true, token });
+        return json({
+          success: true,
+          message: "Login successful",
+          token,
+        });
       } catch (e) {
         return json({ success: false, error: e.message }, 500);
       }
     }
 
     // =========================
-    // SEND OTP ✅
+    // SEND OTP (SMART LOGIC)
     // =========================
     if (path === "/auth/send-otp" && request.method === "POST") {
       try {
@@ -84,6 +101,20 @@ export default {
 
         if (!email)
           return json({ success: false, message: "Email required" }, 400);
+
+        // 🔍 Check user already exists?
+        const existingUser = await env.DB.prepare(
+          `SELECT id, is_verified FROM users WHERE email = ?`
+        )
+          .bind(email)
+          .first();
+
+        if (existingUser && existingUser.is_verified === 1) {
+          return json({
+            success: false,
+            message: "Account already exists. Please login.",
+          });
+        }
 
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         const expires = Date.now() + 5 * 60 * 1000;
@@ -95,63 +126,94 @@ export default {
           .bind(email, otp, expires, new Date().toISOString())
           .run();
 
-        return json({ success: true, otp });
+        return json({
+          success: true,
+          message: "OTP sent",
+          otp, // testing only (later remove)
+        });
       } catch (e) {
         return json({ success: false, error: e.message }, 500);
       }
     }
 
     // =========================
-    // VERIFY OTP ✅
+    // VERIFY OTP + CREATE ACCOUNT
     // =========================
     if (path === "/auth/verify-otp" && request.method === "POST") {
-  try {
-    const { email, otp } = await request.json();
+      try {
+        const { email, password, otp } = await request.json();
 
-    if (!email || !otp)
-      return json({ success: false, message: "Missing fields" }, 400);
+        if (!email || !password || !otp)
+          return json({ success: false, message: "Missing fields" }, 400);
 
-    const existingUser = await env.DB.prepare(
-      "SELECT id FROM users WHERE email = ?"
-    ).bind(email).first();
+        const record = await env.DB.prepare(
+          `SELECT otp, expires_at FROM otp_codes WHERE email = ?`
+        )
+          .bind(email)
+          .first();
 
-    if (existingUser) {
-      return json({
-        success: false,
-        message: "Account already exists. Please login.",
-      }, 400);
+        if (!record)
+          return json({ success: false, message: "No OTP found" }, 400);
+
+        if (record.otp !== otp)
+          return json({ success: false, message: "Wrong OTP" }, 400);
+
+        if (Date.now() > record.expires_at)
+          return json({ success: false, message: "OTP expired" }, 400);
+
+        const existingUser = await env.DB.prepare(
+          `SELECT id FROM users WHERE email = ?`
+        )
+          .bind(email)
+          .first();
+
+        if (existingUser) {
+          await env.DB.prepare(
+            `UPDATE users SET is_verified = 1 WHERE email = ?`
+          )
+            .bind(email)
+            .run();
+
+          return json({
+            success: true,
+            message: "Account verified. Please login.",
+          });
+        }
+
+        await env.DB.prepare(
+          `INSERT INTO users (email, password_hash, is_verified, created_at)
+           VALUES (?, ?, 1, ?)`
+        )
+          .bind(email, password, new Date().toISOString())
+          .run();
+
+        await env.DB.prepare(`DELETE FROM otp_codes WHERE email = ?`)
+          .bind(email)
+          .run();
+
+        return json({
+          success: true,
+          message: "Account created successfully",
+        });
+      } catch (e) {
+        return json({ success: false, error: e.message }, 500);
+      }
     }
 
-    const record = await env.DB.prepare(
-      `SELECT otp, expires_at FROM otp_codes WHERE email = ?`
-    ).bind(email).first();
-
-    if (!record)
-      return json({ success: false, message: "No OTP found" }, 400);
-
-    if (record.otp !== otp)
-      return json({ success: false, message: "Wrong OTP" }, 400);
-
-    if (Date.now() > record.expires_at)
-      return json({ success: false, message: "OTP expired" }, 400);
-
-    return json({ success: true });
-  } catch (e) {
-    return json({ success: false, error: e.message }, 500);
-  }
-}
     // =========================
-    // AUTH ME ✅
+    // AUTH ME (TOKEN CHECK)
     // =========================
     if (path === "/auth/me" && request.method === "GET") {
       const auth = request.headers.get("Authorization");
 
-      if (!auth) return json({ success: false, message: "No token" }, 401);
+      if (!auth || !auth.startsWith("Bearer "))
+        return json({ success: false, message: "No token" }, 401);
 
       const token = auth.replace("Bearer ", "");
       const payload = readToken(token);
 
-      if (!payload) return json({ success: false, message: "Bad token" }, 401);
+      if (!payload)
+        return json({ success: false, message: "Bad token" }, 401);
 
       if (Date.now() > payload.exp)
         return json({ success: false, message: "Token expired" }, 401);
@@ -162,6 +224,6 @@ export default {
       });
     }
 
-    return json({ error: "Not found" }, 404);
+    return json({ success: false, message: "Route not found" }, 404);
   },
 };
