@@ -105,30 +105,41 @@ export default {
     // VERIFY OTP ✅
     // =========================
     if (path === "/auth/verify-otp" && request.method === "POST") {
-      try {
-        const { email, otp } = await request.json();
+  try {
+    const { email, otp } = await request.json();
 
-        const record = await env.DB.prepare(
-          `SELECT otp, expires_at FROM otp_codes WHERE email = ?`
-        )
-          .bind(email)
-          .first();
+    if (!email || !otp)
+      return json({ success: false, message: "Missing fields" }, 400);
 
-        if (!record)
-          return json({ success: false, message: "No OTP found" }, 400);
+    const existingUser = await env.DB.prepare(
+      "SELECT id FROM users WHERE email = ?"
+    ).bind(email).first();
 
-        if (record.otp !== otp)
-          return json({ success: false, message: "Wrong OTP" }, 400);
-
-        if (Date.now() > record.expires_at)
-          return json({ success: false, message: "OTP expired" }, 400);
-
-        return json({ success: true });
-      } catch (e) {
-        return json({ success: false, error: e.message }, 500);
-      }
+    if (existingUser) {
+      return json({
+        success: false,
+        message: "Account already exists. Please login.",
+      }, 400);
     }
 
+    const record = await env.DB.prepare(
+      `SELECT otp, expires_at FROM otp_codes WHERE email = ?`
+    ).bind(email).first();
+
+    if (!record)
+      return json({ success: false, message: "No OTP found" }, 400);
+
+    if (record.otp !== otp)
+      return json({ success: false, message: "Wrong OTP" }, 400);
+
+    if (Date.now() > record.expires_at)
+      return json({ success: false, message: "OTP expired" }, 400);
+
+    return json({ success: true });
+  } catch (e) {
+    return json({ success: false, error: e.message }, 500);
+  }
+}
     // =========================
     // AUTH ME ✅
     // =========================
