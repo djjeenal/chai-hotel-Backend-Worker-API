@@ -9,6 +9,16 @@ export default {
         headers: { "Content-Type": "application/json" },
       });
 
+    // =========================
+    // Helpers
+    // =========================
+
+    const hashPassword = async (password) => {
+      const data = new TextEncoder().encode(password);
+      const hash = await crypto.subtle.digest("SHA-256", data);
+      return btoa(String.fromCharCode(...new Uint8Array(hash)));
+    };
+
     const makeToken = (payload) => btoa(JSON.stringify(payload));
 
     const readToken = (token) => {
@@ -19,242 +29,242 @@ export default {
       }
     };
 
-    const getUserFromRequest = (request) => {
+    const getUserFromToken = async () => {
       const auth = request.headers.get("Authorization");
       if (!auth) return null;
 
       const token = auth.replace("Bearer ", "");
-      const data = readToken(token);
+      const payload = readToken(token);
+      if (!payload) return null;
 
-      if (!data) return null;
-      if (Date.now() > data.exp) return null;
+      if (Date.now() > payload.exp) return null;
 
-      return data;
+      // Check blacklist
+      const blacklisted = await env.DB.prepare(
+        "SELECT token FROM sessions WHERE token = ?"
+      ).bind(token).first();
+
+      if (blacklisted) return null;
+
+      return { token, payload };
+    };
+
+    // =========================
+    // RATE LIMIT (basic)
+    // =========================
+
+    const rateLimit = async (key, limit = 5, windowMs = 60000) => {
+      const now = Date.now();
+
+      const record = await env.DB.prepare(
+        "SELECT count, expires_at FROM rate_limits WHERE key = ?"
+      ).bind(key).first();
+
+      if (!record) {
+        await env.DB.prepare(
+          "INSERT INTO rate_limits (key, count, expires_at) VALUES (?, ?, ?)"
+        ).bind(key, 1, now + windowMs).run();
+        return false;
+      }
+
+      if (now > record.expires_at) {
+        await env.DB.prepare(
+          "UPDATE rate_limits SET count = 1, expires_at = ? WHERE key = ?"
+        ).bind(now + windowMs, key).run();
+        return false;
+      }
+
+      if (record.count >= limit) return true;
+
+      await env.DB.prepare(
+        "UPDATE rate_limits SET count = count + 1 WHERE key = ?"
+      ).bind(key).run();
+
+      return false;
     };
 
     // =========================
     // SEND OTP
     // =========================
+
     if (path === "/auth/send-otp" && request.method === "POST") {
-      try {
-        const body = await request.json();
-        const email = (body.email || "").trim();
+      const { email } = await request.json();
 
-        if (!email)
-          return json({ success: false, message: "Email required" }, 400);
+      if (await rateLimit(`otp:${email}`))
+        return json({ success: false, message: "Too many requests" }, 429);
 
-        const existingUser = await env.DB.prepare(
-          `SELECT id FROM users WHERE email = ?`
-        )
-          .bind(email)
-          .first();
+      const existingUser = await env.DB.prepare(
+        "SELECT id FROM users WHERE email = ?"
+      ).bind(email).first();
 
-        if (existingUser)
-          return json({
-            success: false,
-            message: "Account already exists. Please login.",
-          });
+      if (existingUser)
+        return json({ success: false, message: "Account already exists" });
 
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        const expires = Date.now() + 5 * 60 * 1000;
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const expires = Date.now() + 5 * 60 * 1000;
 
-        await env.DB.prepare(
-          `INSERT OR REPLACE INTO otp_codes (email, otp, expires_at, created_at)
-           VALUES (?, ?, ?, ?)`
-        )
-          .bind(email, otp, expires, new Date().toISOString())
-          .run();
+      await env.DB.prepare(
+        `INSERT OR REPLACE INTO otp_codes (email, otp, expires_at, created_at)
+         VALUES (?, ?, ?, ?)`
+      ).bind(email, otp, expires, new Date().toISOString()).run();
 
-        return json({ success: true, message: "OTP sent", otp });
-      } catch (e) {
-        return json({ success: false, error: e.message }, 500);
-      }
+      return json({ success: true, otp });
+    }
+
+    // =========================
+    // RESEND OTP
+    // =========================
+
+    if (path === "/auth/resend-otp" && request.method === "POST") {
+      const { email } = await request.json();
+
+      if (await rateLimit(`resend:${email}`, 2, 30000))
+        return json({ success: false, message: "Wait before retry" });
+
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const expires = Date.now() + 5 * 60 * 1000;
+
+      await env.DB.prepare(
+        `INSERT OR REPLACE INTO otp_codes (email, otp, expires_at, created_at)
+         VALUES (?, ?, ?, ?)`
+      ).bind(email, otp, expires, new Date().toISOString()).run();
+
+      return json({ success: true, otp });
     }
 
     // =========================
     // VERIFY OTP + REGISTER
     // =========================
+
     if (path === "/auth/verify-otp" && request.method === "POST") {
-      try {
-        const body = await request.json();
+      const { email, password, otp } = await request.json();
 
-        const email = (body.email || "").trim();
-        const password = (body.password || "").trim();
-        const otp = (body.otp || "").trim();
+      const record = await env.DB.prepare(
+        "SELECT otp, expires_at FROM otp_codes WHERE email = ?"
+      ).bind(email).first();
 
-        if (!email || !password || !otp)
-          return json({ success: false, message: "Missing fields" }, 400);
+      if (!record) return json({ success: false, message: "No OTP found" });
 
-        const record = await env.DB.prepare(
-          `SELECT otp, expires_at FROM otp_codes WHERE email = ?`
-        )
-          .bind(email)
-          .first();
+      if (Date.now() > record.expires_at)
+        return json({ success: false, message: "OTP expired" });
 
-        if (!record)
-          return json({ success: false, message: "No OTP found" }, 400);
+      if (record.otp !== otp)
+        return json({ success: false, message: "Wrong OTP" });
 
-        if (Date.now() > Number(record.expires_at))
-          return json({ success: false, message: "OTP expired" }, 400);
+      const hashed = await hashPassword(password);
 
-        if ((record.otp || "").trim() !== otp)
-          return json({ success: false, message: "Wrong OTP" }, 400);
+      const result = await env.DB.prepare(
+        `INSERT INTO users (email, password_hash, is_verified, created_at)
+         VALUES (?, ?, 1, ?)`
+      ).bind(email, hashed, new Date().toISOString()).run();
 
-        const result = await env.DB.prepare(
-          `INSERT INTO users (email, password_hash, is_verified, created_at)
-           VALUES (?, ?, 1, ?)`
-        )
-          .bind(email, password, new Date().toISOString())
-          .run();
+      await env.DB.prepare("DELETE FROM otp_codes WHERE email = ?")
+        .bind(email).run();
 
-        await env.DB.prepare(`DELETE FROM otp_codes WHERE email = ?`)
-          .bind(email)
-          .run();
+      const payload = {
+        user_id: result.meta.last_row_id,
+        email,
+        exp: Date.now() + 15 * 60 * 1000,
+      };
 
-        const payload = {
-          user_id: result.meta.last_row_id,
-          email,
-          exp: Date.now() + 24 * 60 * 60 * 1000,
-        };
+      const refresh = makeToken({
+        email,
+        exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+        type: "refresh",
+      });
 
-        const token = makeToken(payload);
-
-        return json({ success: true, message: "Account created", token });
-      } catch (e) {
-        return json({ success: false, error: e.message }, 500);
-      }
+      return json({ success: true, token: makeToken(payload), refresh });
     }
 
     // =========================
     // LOGIN
     // =========================
+
     if (path === "/auth/login" && request.method === "POST") {
-      try {
-        const body = await request.json();
-        const email = (body.email || "").trim();
-        const password = (body.password || "").trim();
+      const { email, password } = await request.json();
 
-        const user = await env.DB.prepare(
-          `SELECT id FROM users WHERE email = ? AND password_hash = ?`
-        )
-          .bind(email, password)
-          .first();
+      const hashed = await hashPassword(password);
 
-        if (!user)
-          return json({ success: false, message: "Invalid login" }, 401);
+      const user = await env.DB.prepare(
+        "SELECT id FROM users WHERE email = ? AND password_hash = ?"
+      ).bind(email, hashed).first();
 
-        const payload = {
-          user_id: user.id,
-          email,
-          exp: Date.now() + 24 * 60 * 60 * 1000,
-        };
+      if (!user) return json({ success: false, message: "Invalid login" });
 
-        const token = makeToken(payload);
+      const token = makeToken({
+        user_id: user.id,
+        email,
+        exp: Date.now() + 15 * 60 * 1000,
+      });
 
-        return json({ success: true, message: "Login successful", token });
-      } catch (e) {
-        return json({ success: false, error: e.message }, 500);
-      }
+      const refresh = makeToken({
+        email,
+        exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+        type: "refresh",
+      });
+
+      return json({ success: true, token, refresh });
     }
 
     // =========================
-    // TOKEN CHECK
+    // REFRESH TOKEN
     // =========================
-    if (path === "/auth/me" && request.method === "GET") {
-      const user = getUserFromRequest(request);
+
+    if (path === "/auth/refresh" && request.method === "POST") {
+      const { refresh } = await request.json();
+      const data = readToken(refresh);
+
+      if (!data || data.type !== "refresh" || Date.now() > data.exp)
+        return json({ success: false, message: "Invalid refresh" });
+
+      const token = makeToken({
+        email: data.email,
+        exp: Date.now() + 15 * 60 * 1000,
+      });
+
+      return json({ success: true, token });
+    }
+
+    // =========================
+    // CHANGE PASSWORD
+    // =========================
+
+    if (path === "/auth/change-password" && request.method === "POST") {
+      const session = await getUserFromToken();
+      if (!session) return json({ success: false, message: "Unauthorized" });
+
+      const { old_password, new_password } = await request.json();
+
+      const oldHash = await hashPassword(old_password);
+      const newHash = await hashPassword(new_password);
+
+      const user = await env.DB.prepare(
+        "SELECT id FROM users WHERE email = ? AND password_hash = ?"
+      ).bind(session.payload.email, oldHash).first();
 
       if (!user)
-        return json({ success: false, message: "Invalid / Expired token" }, 401);
+        return json({ success: false, message: "Wrong old password" });
 
-      return json({ success: true, user });
+      await env.DB.prepare(
+        "UPDATE users SET password_hash = ? WHERE id = ?"
+      ).bind(newHash, user.id).run();
+
+      return json({ success: true, message: "Password updated" });
     }
 
     // =========================
-    // GET MENU
+    // LOGOUT
     // =========================
-    if (path === "/menu" && request.method === "GET") {
-      try {
-        const items = await env.DB.prepare(
-          `SELECT * FROM menu_items WHERE is_active = 1 ORDER BY id DESC`
-        ).all();
 
-        return json({ success: true, items: items.results });
-      } catch (e) {
-        return json({ success: false, error: e.message }, 500);
-      }
-    }
+    if (path === "/auth/logout" && request.method === "POST") {
+      const session = await getUserFromToken();
+      if (!session) return json({ success: false });
 
-    // =========================
-    // CREATE ORDER
-    // =========================
-    if (path === "/order/create" && request.method === "POST") {
-      try {
-        const user = getUserFromRequest(request);
+      await env.DB.prepare(
+        "INSERT INTO sessions (token) VALUES (?)"
+      ).bind(session.token).run();
 
-        if (!user)
-          return json({ success: false, message: "Unauthorized" }, 401);
-
-        const body = await request.json();
-        const items = body.items || [];
-
-        if (!items.length)
-          return json({ success: false, message: "No items" }, 400);
-
-        let total = 0;
-
-        const orderRes = await env.DB.prepare(
-          `INSERT INTO orders (user_id, total, status, created_at)
-           VALUES (?, 0, 'PENDING', ?)`
-        )
-          .bind(user.user_id, new Date().toISOString())
-          .run();
-
-        const orderId = orderRes.meta.last_row_id;
-
-        for (const item of items) {
-          const price = Number(item.price);
-          const qty = Number(item.qty);
-
-          total += price * qty;
-
-          await env.DB.prepare(
-            `INSERT INTO order_items (order_id, item_id, name, price, qty)
-             VALUES (?, ?, ?, ?, ?)`
-          )
-            .bind(orderId, item.item_id, item.name, price, qty)
-            .run();
-        }
-
-        await env.DB.prepare(`UPDATE orders SET total = ? WHERE id = ?`)
-          .bind(total, orderId)
-          .run();
-
-        return json({ success: true, message: "Order placed", total });
-      } catch (e) {
-        return json({ success: false, error: e.message }, 500);
-      }
-    }
-
-    // =========================
-    // MY ORDERS
-    // =========================
-    if (path === "/order/my-orders" && request.method === "GET") {
-      try {
-        const user = getUserFromRequest(request);
-
-        if (!user)
-          return json({ success: false, message: "Unauthorized" }, 401);
-
-        const orders = await env.DB.prepare(
-          `SELECT * FROM orders WHERE user_id = ? ORDER BY id DESC`
-        )
-          .bind(user.user_id)
-          .all();
-
-        return json({ success: true, orders: orders.results });
-      } catch (e) {
-        return json({ success: false, error: e.message }, 500);
-      }
+      return json({ success: true });
     }
 
     return json({ success: false, message: "Not found" }, 404);
