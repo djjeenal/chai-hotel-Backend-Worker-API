@@ -28,28 +28,30 @@ export default {
     }
 
     // =========================
-    // SEND OTP (RATE LIMITED) ✅
+    // SEND OTP (SAFE + RATE LIMIT) ✅
     // =========================
     if (path === "/auth/send-otp" && request.method === "POST") {
       try {
-        const { email } = await request.json();
+        const body = await request.json();
+        const email = (body.email || "").trim();
+
         if (!email)
           return json({ success: false, message: "Email required" }, 400);
 
-        // 🔥 RATE LIMIT CHECK (60 sec per email)
         const existing = await env.DB.prepare(
           `SELECT created_at FROM otp_codes WHERE email = ?`
         ).bind(email).first();
 
-        if (existing) {
+        if (existing?.created_at) {
           const last = new Date(existing.created_at).getTime();
-          const diff = Date.now() - last;
-
-          if (diff < 60000) {
-            return json({
-              success: false,
-              message: "Please wait before requesting OTP again"
-            }, 429);
+          if (!isNaN(last)) {
+            const diff = Date.now() - last;
+            if (diff < 60000) {
+              return json({
+                success: false,
+                message: "Wait before requesting OTP again"
+              }, 429);
+            }
           }
         }
 
@@ -68,6 +70,7 @@ export default {
           message: "OTP generated",
           otp // remove later in production
         });
+
       } catch (e) {
         return json({ success: false, error: e.message }, 500);
       }
@@ -78,7 +81,12 @@ export default {
     // =========================
     if (path === "/auth/verify-otp" && request.method === "POST") {
       try {
-        const { email, password, otp } = await request.json();
+        const body = await request.json();
+
+        const email = (body.email || "").trim();
+        const password = (body.password || "").toString();
+
+        const otp = (body.otp || "").toString().trim();
 
         if (!email || !password || !otp)
           return json({ success: false, message: "Missing fields" }, 400);
@@ -90,10 +98,10 @@ export default {
         if (!record)
           return json({ success: false, message: "No OTP found" }, 400);
 
-        if (Date.now() > record.expires_at)
+        if (Date.now() > Number(record.expires_at))
           return json({ success: false, message: "OTP expired" }, 400);
 
-        if (record.otp !== otp)
+        if ((record.otp || "").trim() !== otp)
           return json({ success: false, message: "Wrong OTP" }, 400);
 
         const existingUser = await env.DB.prepare(
@@ -125,12 +133,10 @@ export default {
           exp: Date.now() + 24 * 60 * 60 * 1000,
         };
 
-        const token = makeToken(payload);
-
         return json({
           success: true,
           message: "Account created",
-          token
+          token: makeToken(payload)
         });
 
       } catch (e) {
@@ -143,7 +149,12 @@ export default {
     // =========================
     if (path === "/auth/login" && request.method === "POST") {
       try {
-        const { email, password } = await request.json();
+        const body = await request.json();
+        const email = (body.email || "").trim();
+        const password = (body.password || "").toString();
+
+        if (!email || !password)
+          return json({ success: false, message: "Missing credentials" }, 400);
 
         const hash = await hashPassword(password);
 
@@ -160,9 +171,10 @@ export default {
           exp: Date.now() + 24 * 60 * 60 * 1000,
         };
 
-        const token = makeToken(payload);
-
-        return json({ success: true, token });
+        return json({
+          success: true,
+          token: makeToken(payload)
+        });
 
       } catch (e) {
         return json({ success: false, error: e.message }, 500);
@@ -170,12 +182,12 @@ export default {
     }
 
     // =========================
-    // CHANGE PASSWORD ✅🔥
+    // CHANGE PASSWORD ✅
     // =========================
     if (path === "/auth/change-password" && request.method === "POST") {
       try {
-        const auth = request.headers.get("Authorization");
-        if (!auth)
+        const auth = request.headers.get("Authorization") || "";
+        if (!auth.startsWith("Bearer "))
           return json({ success: false, message: "No token" }, 401);
 
         const token = auth.replace("Bearer ", "");
@@ -184,10 +196,15 @@ export default {
         if (!session || Date.now() > session.exp)
           return json({ success: false, message: "Invalid session" }, 401);
 
-        const { oldPassword, newPassword } = await request.json();
+        const body = await request.json();
+        const oldPassword = (body.oldPassword || "").toString();
+        const newPassword = (body.newPassword || "").toString();
 
         if (!oldPassword || !newPassword)
           return json({ success: false, message: "Missing fields" }, 400);
+
+        if (newPassword.length < 4)
+          return json({ success: false, message: "Weak password" });
 
         const oldHash = await hashPassword(oldPassword);
 
@@ -204,10 +221,7 @@ export default {
           `UPDATE users SET password_hash = ? WHERE id = ?`
         ).bind(newHash, session.user_id).run();
 
-        return json({
-          success: true,
-          message: "Password changed successfully"
-        });
+        return json({ success: true, message: "Password updated" });
 
       } catch (e) {
         return json({ success: false, error: e.message }, 500);
@@ -218,8 +232,9 @@ export default {
     // TOKEN CHECK ✅
     // =========================
     if (path === "/auth/me" && request.method === "GET") {
-      const auth = request.headers.get("Authorization");
-      if (!auth) return json({ success: false }, 401);
+      const auth = request.headers.get("Authorization") || "";
+      if (!auth.startsWith("Bearer "))
+        return json({ success: false }, 401);
 
       const token = auth.replace("Bearer ", "");
       const data = readToken(token);
