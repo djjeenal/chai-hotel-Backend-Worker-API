@@ -19,16 +19,21 @@ export default {
       }
     };
 
-    async function hashPassword(password) {
-      const enc = new TextEncoder().encode(password);
-      const hash = await crypto.subtle.digest("SHA-256", enc);
-      return Array.from(new Uint8Array(hash))
-        .map(b => b.toString(16).padStart(2, "0"))
-        .join("");
-    }
+    const getUserFromRequest = (request) => {
+      const auth = request.headers.get("Authorization");
+      if (!auth) return null;
+
+      const token = auth.replace("Bearer ", "");
+      const data = readToken(token);
+
+      if (!data) return null;
+      if (Date.now() > data.exp) return null;
+
+      return data;
+    };
 
     // =========================
-    // SEND OTP (SAFE + RATE LIMIT) ✅
+    // SEND OTP
     // =========================
     if (path === "/auth/send-otp" && request.method === "POST") {
       try {
@@ -38,22 +43,17 @@ export default {
         if (!email)
           return json({ success: false, message: "Email required" }, 400);
 
-        const existing = await env.DB.prepare(
-          `SELECT created_at FROM otp_codes WHERE email = ?`
-        ).bind(email).first();
+        const existingUser = await env.DB.prepare(
+          `SELECT id FROM users WHERE email = ?`
+        )
+          .bind(email)
+          .first();
 
-        if (existing?.created_at) {
-          const last = new Date(existing.created_at).getTime();
-          if (!isNaN(last)) {
-            const diff = Date.now() - last;
-            if (diff < 60000) {
-              return json({
-                success: false,
-                message: "Wait before requesting OTP again"
-              }, 429);
-            }
-          }
-        }
+        if (existingUser)
+          return json({
+            success: false,
+            message: "Account already exists. Please login.",
+          });
 
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         const expires = Date.now() + 5 * 60 * 1000;
@@ -65,35 +65,31 @@ export default {
           .bind(email, otp, expires, new Date().toISOString())
           .run();
 
-        return json({
-          success: true,
-          message: "OTP generated",
-          otp // remove later in production
-        });
-
+        return json({ success: true, message: "OTP sent", otp });
       } catch (e) {
         return json({ success: false, error: e.message }, 500);
       }
     }
 
     // =========================
-    // VERIFY OTP + REGISTER ✅
+    // VERIFY OTP + REGISTER
     // =========================
     if (path === "/auth/verify-otp" && request.method === "POST") {
       try {
         const body = await request.json();
 
         const email = (body.email || "").trim();
-        const password = (body.password || "").toString();
-
-        const otp = (body.otp || "").toString().trim();
+        const password = (body.password || "").trim();
+        const otp = (body.otp || "").trim();
 
         if (!email || !password || !otp)
           return json({ success: false, message: "Missing fields" }, 400);
 
         const record = await env.DB.prepare(
           `SELECT otp, expires_at FROM otp_codes WHERE email = ?`
-        ).bind(email).first();
+        )
+          .bind(email)
+          .first();
 
         if (!record)
           return json({ success: false, message: "No OTP found" }, 400);
@@ -104,23 +100,11 @@ export default {
         if ((record.otp || "").trim() !== otp)
           return json({ success: false, message: "Wrong OTP" }, 400);
 
-        const existingUser = await env.DB.prepare(
-          `SELECT id FROM users WHERE email = ?`
-        ).bind(email).first();
-
-        if (existingUser)
-          return json({
-            success: false,
-            message: "Account already exists. Please login."
-          });
-
-        const hash = await hashPassword(password);
-
         const result = await env.DB.prepare(
           `INSERT INTO users (email, password_hash, is_verified, created_at)
            VALUES (?, ?, 1, ?)`
         )
-          .bind(email, hash, new Date().toISOString())
+          .bind(email, password, new Date().toISOString())
           .run();
 
         await env.DB.prepare(`DELETE FROM otp_codes WHERE email = ?`)
@@ -133,34 +117,28 @@ export default {
           exp: Date.now() + 24 * 60 * 60 * 1000,
         };
 
-        return json({
-          success: true,
-          message: "Account created",
-          token: makeToken(payload)
-        });
+        const token = makeToken(payload);
 
+        return json({ success: true, message: "Account created", token });
       } catch (e) {
         return json({ success: false, error: e.message }, 500);
       }
     }
 
     // =========================
-    // LOGIN ✅
+    // LOGIN
     // =========================
     if (path === "/auth/login" && request.method === "POST") {
       try {
         const body = await request.json();
         const email = (body.email || "").trim();
-        const password = (body.password || "").toString();
-
-        if (!email || !password)
-          return json({ success: false, message: "Missing credentials" }, 400);
-
-        const hash = await hashPassword(password);
+        const password = (body.password || "").trim();
 
         const user = await env.DB.prepare(
           `SELECT id FROM users WHERE email = ? AND password_hash = ?`
-        ).bind(email, hash).first();
+        )
+          .bind(email, password)
+          .first();
 
         if (!user)
           return json({ success: false, message: "Invalid login" }, 401);
@@ -171,78 +149,112 @@ export default {
           exp: Date.now() + 24 * 60 * 60 * 1000,
         };
 
-        return json({
-          success: true,
-          token: makeToken(payload)
-        });
+        const token = makeToken(payload);
 
+        return json({ success: true, message: "Login successful", token });
       } catch (e) {
         return json({ success: false, error: e.message }, 500);
       }
     }
 
     // =========================
-    // CHANGE PASSWORD ✅
-    // =========================
-    if (path === "/auth/change-password" && request.method === "POST") {
-      try {
-        const auth = request.headers.get("Authorization") || "";
-        if (!auth.startsWith("Bearer "))
-          return json({ success: false, message: "No token" }, 401);
-
-        const token = auth.replace("Bearer ", "");
-        const session = readToken(token);
-
-        if (!session || Date.now() > session.exp)
-          return json({ success: false, message: "Invalid session" }, 401);
-
-        const body = await request.json();
-        const oldPassword = (body.oldPassword || "").toString();
-        const newPassword = (body.newPassword || "").toString();
-
-        if (!oldPassword || !newPassword)
-          return json({ success: false, message: "Missing fields" }, 400);
-
-        if (newPassword.length < 4)
-          return json({ success: false, message: "Weak password" });
-
-        const oldHash = await hashPassword(oldPassword);
-
-        const user = await env.DB.prepare(
-          `SELECT id FROM users WHERE id = ? AND password_hash = ?`
-        ).bind(session.user_id, oldHash).first();
-
-        if (!user)
-          return json({ success: false, message: "Old password incorrect" });
-
-        const newHash = await hashPassword(newPassword);
-
-        await env.DB.prepare(
-          `UPDATE users SET password_hash = ? WHERE id = ?`
-        ).bind(newHash, session.user_id).run();
-
-        return json({ success: true, message: "Password updated" });
-
-      } catch (e) {
-        return json({ success: false, error: e.message }, 500);
-      }
-    }
-
-    // =========================
-    // TOKEN CHECK ✅
+    // TOKEN CHECK
     // =========================
     if (path === "/auth/me" && request.method === "GET") {
-      const auth = request.headers.get("Authorization") || "";
-      if (!auth.startsWith("Bearer "))
-        return json({ success: false }, 401);
+      const user = getUserFromRequest(request);
 
-      const token = auth.replace("Bearer ", "");
-      const data = readToken(token);
+      if (!user)
+        return json({ success: false, message: "Invalid / Expired token" }, 401);
 
-      if (!data || Date.now() > data.exp)
-        return json({ success: false }, 401);
+      return json({ success: true, user });
+    }
 
-      return json({ success: true, user: data });
+    // =========================
+    // GET MENU
+    // =========================
+    if (path === "/menu" && request.method === "GET") {
+      try {
+        const items = await env.DB.prepare(
+          `SELECT * FROM menu_items WHERE is_active = 1 ORDER BY id DESC`
+        ).all();
+
+        return json({ success: true, items: items.results });
+      } catch (e) {
+        return json({ success: false, error: e.message }, 500);
+      }
+    }
+
+    // =========================
+    // CREATE ORDER
+    // =========================
+    if (path === "/order/create" && request.method === "POST") {
+      try {
+        const user = getUserFromRequest(request);
+
+        if (!user)
+          return json({ success: false, message: "Unauthorized" }, 401);
+
+        const body = await request.json();
+        const items = body.items || [];
+
+        if (!items.length)
+          return json({ success: false, message: "No items" }, 400);
+
+        let total = 0;
+
+        const orderRes = await env.DB.prepare(
+          `INSERT INTO orders (user_id, total, status, created_at)
+           VALUES (?, 0, 'PENDING', ?)`
+        )
+          .bind(user.user_id, new Date().toISOString())
+          .run();
+
+        const orderId = orderRes.meta.last_row_id;
+
+        for (const item of items) {
+          const price = Number(item.price);
+          const qty = Number(item.qty);
+
+          total += price * qty;
+
+          await env.DB.prepare(
+            `INSERT INTO order_items (order_id, item_id, name, price, qty)
+             VALUES (?, ?, ?, ?, ?)`
+          )
+            .bind(orderId, item.item_id, item.name, price, qty)
+            .run();
+        }
+
+        await env.DB.prepare(`UPDATE orders SET total = ? WHERE id = ?`)
+          .bind(total, orderId)
+          .run();
+
+        return json({ success: true, message: "Order placed", total });
+      } catch (e) {
+        return json({ success: false, error: e.message }, 500);
+      }
+    }
+
+    // =========================
+    // MY ORDERS
+    // =========================
+    if (path === "/order/my-orders" && request.method === "GET") {
+      try {
+        const user = getUserFromRequest(request);
+
+        if (!user)
+          return json({ success: false, message: "Unauthorized" }, 401);
+
+        const orders = await env.DB.prepare(
+          `SELECT * FROM orders WHERE user_id = ? ORDER BY id DESC`
+        )
+          .bind(user.user_id)
+          .all();
+
+        return json({ success: true, orders: orders.results });
+      } catch (e) {
+        return json({ success: false, error: e.message }, 500);
+      }
     }
 
     return json({ success: false, message: "Not found" }, 404);
