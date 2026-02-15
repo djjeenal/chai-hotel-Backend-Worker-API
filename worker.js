@@ -3,113 +3,102 @@ export default {
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Allow-Headers": "Content-Type",
     };
 
     if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
+      return new Response("OK", { headers: corsHeaders });
     }
 
     const url = new URL(request.url);
-    const path = url.pathname;
-
-    const jsonResponse = (data, status = 200) =>
-      new Response(JSON.stringify(data), {
-        status,
-        headers: { "Content-Type": "application/json", ...corsHeaders },
-      });
 
     try {
-      // ✅ Health Check
-      if (path === "/") {
-        return jsonResponse({ success: true, message: "Backend working" });
-      }
 
-      // ✅ SEND OTP
-      if (path === "/auth/send-otp" && request.method === "POST") {
+      /* ================= SEND OTP ================= */
+
+      if (url.pathname === "/send-otp" && request.method === "POST") {
         const body = await request.json();
         const email = body.email;
 
         if (!email) {
-          return jsonResponse({ success: false, message: "Email required" }, 400);
+          return json({ success: false, message: "Email required" }, corsHeaders);
         }
 
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        const expiresAt = Date.now() + 5 * 60 * 1000;
 
-        // Save OTP in DB
         await env.DB.prepare(
-          "INSERT OR REPLACE INTO otps (email, otp, expires_at) VALUES (?, ?, ?)"
-        )
-          .bind(email, otp, Date.now() + 5 * 60 * 1000)
-          .run();
+          "INSERT INTO otps (email, otp, expires_at) VALUES (?, ?, ?)"
+        ).bind(email, otp, expiresAt).run();
 
-        // Send Email via Resend
-        const resendResponse = await fetch("https://api.resend.com/emails", {
+        const emailRes = await fetch("https://api.brevo.com/v3/smtp/email", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${env.RESEND_API_KEY}`,
+            "api-key": env.BREVO_API_KEY,
           },
           body: JSON.stringify({
-            from: "Chai Hotel <onboarding@resend.dev>",
-            to: [email],
+            sender: {
+              name: "Chai Hotel",
+              email: "noreply@chaihotel.xyz"
+            },
+            to: [{ email }],
             subject: "Your OTP Code",
-            html: `<h2>Your OTP: ${otp}</h2><p>Valid for 5 minutes</p>`,
+            htmlContent: `<h2>Your OTP: ${otp}</h2><p>Valid for 5 minutes</p>`
           }),
         });
 
-        if (!resendResponse.ok) {
-          return jsonResponse({ success: false, message: "Email send failed" }, 500);
+        if (!emailRes.ok) {
+          const errText = await emailRes.text();
+          return json({
+            success: false,
+            message: "Email send failed",
+            error: errText
+          }, corsHeaders);
         }
 
-        return jsonResponse({ success: true, message: "OTP Sent to Email" });
+        return json({ success: true, message: "OTP sent" }, corsHeaders);
       }
 
-      // ✅ VERIFY OTP
-      if (path === "/auth/verify-otp" && request.method === "POST") {
-        const body = await request.json();
-        const { email, otp, password } = body;
+      /* ================= VERIFY OTP ================= */
 
-        if (!email || !otp || !password) {
-          return jsonResponse({ success: false, message: "Missing fields" }, 400);
-        }
+      if (url.pathname === "/verify-otp" && request.method === "POST") {
+        const body = await request.json();
+        const { email, otp } = body;
 
         const record = await env.DB.prepare(
-          "SELECT * FROM otps WHERE email = ?"
-        )
-          .bind(email)
-          .first();
+          "SELECT * FROM otps WHERE email = ? ORDER BY id DESC LIMIT 1"
+        ).bind(email).first();
 
         if (!record) {
-          return jsonResponse({ success: false, message: "OTP not found" }, 400);
-        }
-
-        if (record.otp !== otp) {
-          return jsonResponse({ success: false, message: "Invalid OTP" }, 400);
+          return json({ success: false, message: "No OTP found" }, corsHeaders);
         }
 
         if (Date.now() > record.expires_at) {
-          return jsonResponse({ success: false, message: "OTP expired" }, 400);
+          return json({ success: false, message: "OTP expired" }, corsHeaders);
         }
 
-        // Save user
-        await env.DB.prepare(
-          "INSERT INTO users (email, password) VALUES (?, ?)"
-        )
-          .bind(email, password)
-          .run();
+        if (record.otp !== otp) {
+          return json({ success: false, message: "Invalid OTP" }, corsHeaders);
+        }
 
-        // Delete OTP
-        await env.DB.prepare("DELETE FROM otps WHERE email = ?")
-          .bind(email)
-          .run();
-
-        return jsonResponse({ success: true, message: "Account created" });
+        return json({ success: true, message: "OTP verified" }, corsHeaders);
       }
 
-      return jsonResponse({ success: false, message: "Not found" }, 404);
+      return json({ success: false, message: "Not found" }, corsHeaders);
+
     } catch (err) {
-      return jsonResponse({ success: false, message: err.message }, 500);
+      return json({
+        success: false,
+        message: "Worker crash",
+        error: err.message
+      }, corsHeaders);
     }
   },
 };
+
+function json(data, headers) {
+  return new Response(JSON.stringify(data), {
+    headers: { "Content-Type": "application/json", ...headers },
+  });
+}
