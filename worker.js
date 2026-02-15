@@ -1,5 +1,6 @@
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
+
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -11,94 +12,90 @@ export default {
     }
 
     const url = new URL(request.url);
+    const path = url.pathname;
 
-    try {
-
-      /* ================= SEND OTP ================= */
-
-      if (url.pathname === "/send-otp" && request.method === "POST") {
-        const body = await request.json();
-        const email = body.email;
+    // ✅ SEND OTP
+    if (path === "/send-otp" && request.method === "POST") {
+      try {
+        const { email } = await request.json();
 
         if (!email) {
-          return json({ success: false, message: "Email required" }, corsHeaders);
+          return new Response(JSON.stringify({ error: "Email required" }), {
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
         }
 
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        const expiresAt = Date.now() + 5 * 60 * 1000;
+        const expires = Date.now() + 5 * 60 * 1000;
 
         await env.DB.prepare(
-          "INSERT INTO otps (email, otp, expires_at) VALUES (?, ?, ?)"
-        ).bind(email, otp, expiresAt).run();
+          "INSERT INTO otp_codes (email, otp, expires_at) VALUES (?, ?, ?)"
+        ).bind(email, otp, expires).run();
 
-        const emailRes = await fetch("https://api.brevo.com/v3/smtp/email", {
+        // ✅ EMAIL भेजो (Resend)
+        await fetch("https://api.resend.com/emails", {
           method: "POST",
           headers: {
+            "Authorization": `Bearer ${env.RESEND_API_KEY}`,
             "Content-Type": "application/json",
-            "api-key": env.BREVO_API_KEY,
           },
           body: JSON.stringify({
-            sender: {
-              name: "Chai Hotel",
-              email: "noreply@chaihotel.xyz"
-            },
-            to: [{ email }],
+            from: "Chai Hotel <noreply@resend.dev>",
+            to: email,
             subject: "Your OTP Code",
-            htmlContent: `<h2>Your OTP: ${otp}</h2><p>Valid for 5 minutes</p>`
+            html: `<h2>Your OTP: ${otp}</h2>`,
           }),
         });
 
-        if (!emailRes.ok) {
-          const errText = await emailRes.text();
-          return json({
-            success: false,
-            message: "Email send failed",
-            error: errText
-          }, corsHeaders);
-        }
+        return new Response(JSON.stringify({ success: true }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
 
-        return json({ success: true, message: "OTP sent" }, corsHeaders);
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
+    }
 
-      /* ================= VERIFY OTP ================= */
-
-      if (url.pathname === "/verify-otp" && request.method === "POST") {
-        const body = await request.json();
-        const { email, otp } = body;
+    // ✅ VERIFY OTP
+    if (path === "/verify-otp" && request.method === "POST") {
+      try {
+        const { email, otp } = await request.json();
 
         const record = await env.DB.prepare(
-          "SELECT * FROM otps WHERE email = ? ORDER BY id DESC LIMIT 1"
+          "SELECT * FROM otp_codes WHERE email = ? ORDER BY rowid DESC LIMIT 1"
         ).bind(email).first();
 
         if (!record) {
-          return json({ success: false, message: "No OTP found" }, corsHeaders);
-        }
-
-        if (Date.now() > record.expires_at) {
-          return json({ success: false, message: "OTP expired" }, corsHeaders);
+          return new Response(JSON.stringify({ error: "OTP not found" }), {
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
         }
 
         if (record.otp !== otp) {
-          return json({ success: false, message: "Invalid OTP" }, corsHeaders);
+          return new Response(JSON.stringify({ error: "Invalid OTP" }), {
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
         }
 
-        return json({ success: true, message: "OTP verified" }, corsHeaders);
+        if (Date.now() > record.expires_at) {
+          return new Response(JSON.stringify({ error: "OTP expired" }), {
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
+        return new Response(JSON.stringify({ success: true }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
-
-      return json({ success: false, message: "Not found" }, corsHeaders);
-
-    } catch (err) {
-      return json({
-        success: false,
-        message: "Worker crash",
-        error: err.message
-      }, corsHeaders);
     }
+
+    return new Response("Not Found", { status: 404, headers: corsHeaders });
   },
 };
-
-function json(data, headers) {
-  return new Response(JSON.stringify(data), {
-    headers: { "Content-Type": "application/json", ...headers },
-  });
-}
