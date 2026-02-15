@@ -1,36 +1,35 @@
 export default {
   async fetch(request, env) {
+
+    // ✅ CORS (VERY IMPORTANT)
     if (request.method === "OPTIONS") {
       return new Response(null, {
         headers: {
           "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type",
         },
       });
     }
 
-    try {
-      const url = new URL(request.url);
+    const url = new URL(request.url);
 
-      if (url.pathname === "/send-otp" && request.method === "POST") {
-        const body = await request.json();
-        const email = body.email;
+    // ✅ SEND OTP
+    if (url.pathname === "/send-otp" && request.method === "POST") {
+      try {
+        const { email } = await request.json();
 
         if (!email) {
-          return json({ error: "Email required" }, 400);
+          return Response.json({ success: false, error: "Email required" });
         }
 
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
-        await env.DB.prepare(
-          "INSERT INTO otp_codes (email, otp, expires_at) VALUES (?, ?, ?)"
-        )
-          .bind(email, otp, Date.now() + 5 * 60 * 1000)
-          .run();
+        // ✅ Save OTP in KV (5 min)
+        await env.OTP_KV.put(email, otp, { expirationTtl: 300 });
 
-        // ✅ BREVO EMAIL भेजो
-        await fetch("https://api.brevo.com/v3/smtp/email", {
+        // ✅ Send Email via Brevo
+        const res = await fetch("https://api.brevo.com/v3/smtp/email", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -39,30 +38,45 @@ export default {
           body: JSON.stringify({
             sender: {
               name: "Chai Hotel",
-              email: "no-reply@chaihotel.xyz"
+              email: "no-reply@chaihotel.xyz", // MUST MATCH VERIFIED
             },
             to: [{ email }],
             subject: "Your OTP Code",
-            htmlContent: `<h2>Your OTP: ${otp}</h2>`
+            htmlContent: `<h2>Your OTP: ${otp}</h2>`,
           }),
         });
 
-        return json({ success: true });
-      }
+        const data = await res.json();
 
-      return json({ error: "Not found" }, 404);
-    } catch (e) {
-      return json({ error: e.message }, 500);
+        if (!res.ok) {
+          return Response.json({ success: false, error: data });
+        }
+
+        return Response.json({ success: true });
+
+      } catch (err) {
+        return Response.json({ success: false, error: err.toString() });
+      }
     }
+
+    // ✅ VERIFY OTP
+    if (url.pathname === "/verify-otp" && request.method === "POST") {
+      try {
+        const { email, otp } = await request.json();
+
+        const savedOtp = await env.OTP_KV.get(email);
+
+        if (savedOtp === otp) {
+          return Response.json({ success: true });
+        } else {
+          return Response.json({ success: false });
+        }
+
+      } catch (err) {
+        return Response.json({ success: false, error: err.toString() });
+      }
+    }
+
+    return new Response("Not Found", { status: 404 });
   },
 };
-
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-    },
-  });
-}
