@@ -10,12 +10,6 @@ export default {
       });
 
     // =========================
-    // CONFIG
-    // =========================
-
-    const TOKEN_SECRET = "MY_SUPER_SECRET_KEY"; // change later
-
-    // =========================
     // Helpers
     // =========================
 
@@ -25,39 +19,11 @@ export default {
       return btoa(String.fromCharCode(...new Uint8Array(hash)));
     };
 
-    const sign = async (data) => {
-      const key = await crypto.subtle.importKey(
-        "raw",
-        new TextEncoder().encode(TOKEN_SECRET),
-        { name: "HMAC", hash: "SHA-256" },
-        false,
-        ["sign"]
-      );
+    const makeToken = (payload) => btoa(JSON.stringify(payload));
 
-      const signature = await crypto.subtle.sign(
-        "HMAC",
-        key,
-        new TextEncoder().encode(data)
-      );
-
-      return btoa(String.fromCharCode(...new Uint8Array(signature)));
-    };
-
-    const makeToken = async (payload) => {
-      const body = JSON.stringify(payload);
-      const signature = await sign(body);
-      return btoa(body) + "." + signature;
-    };
-
-    const readToken = async (token) => {
+    const readToken = (token) => {
       try {
-        const [bodyB64, signature] = token.split(".");
-        const body = atob(bodyB64);
-
-        const validSig = await sign(body);
-        if (validSig !== signature) return null;
-
-        return JSON.parse(body);
+        return JSON.parse(atob(token));
       } catch {
         return null;
       }
@@ -68,154 +34,46 @@ export default {
       if (!auth) return null;
 
       const token = auth.replace("Bearer ", "");
-      const payload = await readToken(token);
+      const payload = readToken(token);
 
-      if (!payload) return null;
-      if (Date.now() > payload.exp) return null;
-      if (!payload.email) return null;
+      if (!payload || Date.now() > payload.exp) return null;
 
-      // Blacklist check
-      const blacklisted = await env.DB.prepare(
-        "SELECT token FROM sessions WHERE token = ?"
-      ).bind(token).first();
-
-      if (blacklisted) return null;
-
-      return { token, payload };
+      return payload;
     };
 
     // =========================
-    // RATE LIMIT
+    // TEST
     // =========================
 
-    const rateLimit = async (key, limit = 5, windowMs = 60000) => {
-      const now = Date.now();
-
-      const record = await env.DB.prepare(
-        "SELECT count, expires_at FROM rate_limits WHERE key = ?"
-      ).bind(key).first();
-
-      if (!record) {
-        await env.DB.prepare(
-          "INSERT INTO rate_limits (key, count, expires_at) VALUES (?, ?, ?)"
-        ).bind(key, 1, now + windowMs).run();
-        return false;
-      }
-
-      if (now > record.expires_at) {
-        await env.DB.prepare(
-          "UPDATE rate_limits SET count = 1, expires_at = ? WHERE key = ?"
-        ).bind(now + windowMs, key).run();
-        return false;
-      }
-
-      if (record.count >= limit) return true;
-
-      await env.DB.prepare(
-        "UPDATE rate_limits SET count = count + 1 WHERE key = ?"
-      ).bind(key).run();
-
-      return false;
-    };
-
-    // =========================
-    // SEND OTP
-    // =========================
-
-    if (path === "/auth/send-otp" && request.method === "POST") {
-      const { email } = await request.json();
-
-      if (!email)
-        return json({ success: false, message: "Email required" });
-
-      if (await rateLimit(`otp:${email}`))
-        return json({ success: false, message: "Too many requests" }, 429);
-
-      const existingUser = await env.DB.prepare(
-        "SELECT id FROM users WHERE email = ?"
-      ).bind(email).first();
-
-      if (existingUser)
-        return json({ success: false, message: "Account already exists" });
-
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      const expires = Date.now() + 5 * 60 * 1000;
-
-      await env.DB.prepare(
-        `INSERT OR REPLACE INTO otp_codes (email, otp, expires_at, created_at)
-         VALUES (?, ?, ?, ?)`
-      ).bind(email, otp, expires, new Date().toISOString()).run();
-
-      return json({ success: true, otp });
+    if (path === "/test") {
+      return json({ success: true, message: "Backend working" });
     }
 
     // =========================
-    // RESEND OTP
+    // REGISTER
     // =========================
 
-    if (path === "/auth/resend-otp" && request.method === "POST") {
-      const { email } = await request.json();
-
-      if (!email)
-        return json({ success: false, message: "Email required" });
-
-      if (await rateLimit(`resend:${email}`, 2, 30000))
-        return json({ success: false, message: "Wait before retry" });
-
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      const expires = Date.now() + 5 * 60 * 1000;
-
-      await env.DB.prepare(
-        `INSERT OR REPLACE INTO otp_codes (email, otp, expires_at, created_at)
-         VALUES (?, ?, ?, ?)`
-      ).bind(email, otp, expires, new Date().toISOString()).run();
-
-      return json({ success: true, otp });
-    }
-
-    // =========================
-    // VERIFY OTP + REGISTER
-    // =========================
-
-    if (path === "/auth/verify-otp" && request.method === "POST") {
-      const { email, password, otp } = await request.json();
-
-      const record = await env.DB.prepare(
-        "SELECT otp, expires_at FROM otp_codes WHERE email = ?"
-      ).bind(email).first();
-
-      if (!record)
-        return json({ success: false, message: "No OTP found" });
-
-      if (Date.now() > record.expires_at)
-        return json({ success: false, message: "OTP expired" });
-
-      if (record.otp !== otp)
-        return json({ success: false, message: "Wrong OTP" });
+    if (path === "/auth/register" && request.method === "POST") {
+      const { email, password } = await request.json();
 
       const hashed = await hashPassword(password);
 
-      const result = await env.DB.prepare(
-        `INSERT INTO users (email, password_hash, is_verified, created_at)
-         VALUES (?, ?, 1, ?)`
-      ).bind(email, hashed, new Date().toISOString()).run();
+      try {
+        const result = await env.DB.prepare(
+          `INSERT INTO users (email, password_hash)
+           VALUES (?, ?)`
+        ).bind(email, hashed).run();
 
-      await env.DB.prepare("DELETE FROM otp_codes WHERE email = ?")
-        .bind(email).run();
+        const token = makeToken({
+          user_id: result.meta.last_row_id,
+          email,
+          exp: Date.now() + 86400000,
+        });
 
-      const token = await makeToken({
-        user_id: result.meta.last_row_id,
-        email,
-        exp: Date.now() + 15 * 60 * 1000,
-      });
-
-      const refresh = await makeToken({
-        email,
-        type: "refresh",
-        exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
-      });
-
-      return json({ success: true, token, refresh });
+        return json({ success: true, token });
+      } catch (e) {
+        return json({ success: false, message: "User exists" });
+      }
     }
 
     // =========================
@@ -231,47 +89,12 @@ export default {
         "SELECT id FROM users WHERE email = ? AND password_hash = ?"
       ).bind(email, hashed).first();
 
-      if (!user)
-        return json({ success: false, message: "Invalid login" });
+      if (!user) return json({ success: false, message: "Invalid login" });
 
-      const token = await makeToken({
+      const token = makeToken({
         user_id: user.id,
         email,
-        exp: Date.now() + 15 * 60 * 1000,
-      });
-
-      const refresh = await makeToken({
-        email,
-        type: "refresh",
-        exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
-      });
-
-      return json({ success: true, token, refresh });
-    }
-
-    // =========================
-    // REFRESH TOKEN
-    // =========================
-
-    if (path === "/auth/refresh" && request.method === "POST") {
-      const { refresh } = await request.json();
-
-      const data = await readToken(refresh);
-
-      if (!data || data.type !== "refresh" || Date.now() > data.exp)
-        return json({ success: false, message: "Invalid refresh" });
-
-      const user = await env.DB.prepare(
-        "SELECT id FROM users WHERE email = ?"
-      ).bind(data.email).first();
-
-      if (!user)
-        return json({ success: false, message: "User not found" });
-
-      const token = await makeToken({
-        user_id: user.id,
-        email: data.email,
-        exp: Date.now() + 15 * 60 * 1000,
+        exp: Date.now() + 86400000,
       });
 
       return json({ success: true, token });
@@ -283,8 +106,7 @@ export default {
 
     if (path === "/auth/change-password" && request.method === "POST") {
       const session = await getUserFromToken();
-      if (!session)
-        return json({ success: false, message: "Unauthorized" });
+      if (!session) return json({ success: false, message: "Unauthorized" });
 
       const { old_password, new_password } = await request.json();
 
@@ -292,32 +114,78 @@ export default {
       const newHash = await hashPassword(new_password);
 
       const user = await env.DB.prepare(
-        "SELECT id FROM users WHERE email = ? AND password_hash = ?"
-      ).bind(session.payload.email, oldHash).first();
+        "SELECT id FROM users WHERE id = ? AND password_hash = ?"
+      ).bind(session.user_id, oldHash).first();
 
-      if (!user)
-        return json({ success: false, message: "Wrong old password" });
+      if (!user) return json({ success: false, message: "Wrong password" });
 
       await env.DB.prepare(
         "UPDATE users SET password_hash = ? WHERE id = ?"
-      ).bind(newHash, user.id).run();
+      ).bind(newHash, session.user_id).run();
 
       return json({ success: true });
     }
 
     // =========================
-    // LOGOUT
+    // CREATE ORDER
     // =========================
 
-    if (path === "/auth/logout" && request.method === "POST") {
+    if (path === "/orders/create" && request.method === "POST") {
       const session = await getUserFromToken();
-      if (!session) return json({ success: false });
+      if (!session) return json({ success: false, message: "Unauthorized" });
 
-      await env.DB.prepare(
-        "INSERT OR IGNORE INTO sessions (token) VALUES (?)"
-      ).bind(session.token).run();
+      const { items } = await request.json();
 
-      return json({ success: true });
+      let total = 0;
+
+      for (const item of items) {
+        total += item.price * item.qty;
+      }
+
+      const order = await env.DB.prepare(
+        `INSERT INTO orders (user_id, total, status, created_at)
+         VALUES (?, ?, 'PENDING', ?)`
+      ).bind(session.user_id, total, Date.now()).run();
+
+      const order_id = order.meta.last_row_id;
+
+      for (const item of items) {
+        await env.DB.prepare(
+          `INSERT INTO order_items (order_id, item_id, name, price, qty)
+           VALUES (?, ?, ?, ?, ?)`
+        ).bind(order_id, item.item_id, item.name, item.price, item.qty).run();
+      }
+
+      return json({ success: true, order_id, total });
+    }
+
+    // =========================
+    // MY ORDERS
+    // =========================
+
+    if (path === "/orders/my-orders" && request.method === "GET") {
+      const session = await getUserFromToken();
+      if (!session) return json({ success: false, message: "Unauthorized" });
+
+      const orders = await env.DB.prepare(
+        "SELECT * FROM orders WHERE user_id = ?"
+      ).bind(session.user_id).all();
+
+      return json({ success: true, orders: orders.results });
+    }
+
+    // =========================
+    // ORDER DETAILS
+    // =========================
+
+    if (path === "/order/details" && request.method === "GET") {
+      const id = url.searchParams.get("id");
+
+      const items = await env.DB.prepare(
+        "SELECT * FROM order_items WHERE order_id = ?"
+      ).bind(id).all();
+
+      return json({ success: true, items: items.results });
     }
 
     return json({ success: false, message: "Not found" }, 404);
