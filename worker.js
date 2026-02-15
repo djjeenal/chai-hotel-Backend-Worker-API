@@ -1,30 +1,49 @@
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
+
     const url = new URL(request.url);
 
-    // Test Route
-    if (url.pathname === "/test") {
+    if (url.pathname === "/") {
       return Response.json({ success: true, message: "Backend working" });
     }
 
-    // Register
-    if (url.pathname === "/auth/register" && request.method === "POST") {
+    if (request.method === "POST" && url.pathname === "/auth/send-otp") {
       const body = await request.json();
-      const { email, password } = body;
+      const email = body.email;
 
-      if (!email || !password) {
-        return Response.json({ success: false, message: "Missing fields" });
+      if (!email) {
+        return Response.json({ success: false, message: "Email required" });
       }
 
+      // DEMO OTP
+      const otp = "123456";
+
       await env.DB.prepare(
-        "INSERT INTO users (email, password_hash) VALUES (?, ?)"
-      )
-        .bind(email, password)
-        .run();
+        "INSERT OR REPLACE INTO otp (email, code) VALUES (?, ?)"
+      ).bind(email, otp).run();
 
       return Response.json({ success: true });
     }
 
+    if (request.method === "POST" && url.pathname === "/auth/verify-otp") {
+      const body = await request.json();
+      const { email, password, otp } = body;
+
+      const row = await env.DB.prepare(
+        "SELECT code FROM otp WHERE email = ?"
+      ).bind(email).first();
+
+      if (!row || row.code !== otp) {
+        return Response.json({ success: false, message: "Invalid OTP" });
+      }
+
+      await env.DB.prepare(
+        "INSERT INTO users (email, password) VALUES (?, ?)"
+      ).bind(email, password).run();
+
+      return Response.json({ success: true, token: "demo-token" });
+    }
+
     return Response.json({ success: false, message: "Not found" }, { status: 404 });
-  },
+  }
 };
