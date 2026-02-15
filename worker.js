@@ -10,6 +10,12 @@ export default {
       });
 
     // =========================
+    // CONFIG
+    // =========================
+
+    const TOKEN_SECRET = "MY_SUPER_SECRET_KEY"; // change later
+
+    // =========================
     // Helpers
     // =========================
 
@@ -19,11 +25,39 @@ export default {
       return btoa(String.fromCharCode(...new Uint8Array(hash)));
     };
 
-    const makeToken = (payload) => btoa(JSON.stringify(payload));
+    const sign = async (data) => {
+      const key = await crypto.subtle.importKey(
+        "raw",
+        new TextEncoder().encode(TOKEN_SECRET),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"]
+      );
 
-    const readToken = (token) => {
+      const signature = await crypto.subtle.sign(
+        "HMAC",
+        key,
+        new TextEncoder().encode(data)
+      );
+
+      return btoa(String.fromCharCode(...new Uint8Array(signature)));
+    };
+
+    const makeToken = async (payload) => {
+      const body = JSON.stringify(payload);
+      const signature = await sign(body);
+      return btoa(body) + "." + signature;
+    };
+
+    const readToken = async (token) => {
       try {
-        return JSON.parse(atob(token));
+        const [bodyB64, signature] = token.split(".");
+        const body = atob(bodyB64);
+
+        const validSig = await sign(body);
+        if (validSig !== signature) return null;
+
+        return JSON.parse(body);
       } catch {
         return null;
       }
@@ -34,12 +68,13 @@ export default {
       if (!auth) return null;
 
       const token = auth.replace("Bearer ", "");
-      const payload = readToken(token);
+      const payload = await readToken(token);
+
       if (!payload) return null;
-
       if (Date.now() > payload.exp) return null;
+      if (!payload.email) return null;
 
-      // Check blacklist
+      // Blacklist check
       const blacklisted = await env.DB.prepare(
         "SELECT token FROM sessions WHERE token = ?"
       ).bind(token).first();
@@ -50,7 +85,7 @@ export default {
     };
 
     // =========================
-    // RATE LIMIT (basic)
+    // RATE LIMIT
     // =========================
 
     const rateLimit = async (key, limit = 5, windowMs = 60000) => {
@@ -90,6 +125,9 @@ export default {
     if (path === "/auth/send-otp" && request.method === "POST") {
       const { email } = await request.json();
 
+      if (!email)
+        return json({ success: false, message: "Email required" });
+
       if (await rateLimit(`otp:${email}`))
         return json({ success: false, message: "Too many requests" }, 429);
 
@@ -118,6 +156,9 @@ export default {
     if (path === "/auth/resend-otp" && request.method === "POST") {
       const { email } = await request.json();
 
+      if (!email)
+        return json({ success: false, message: "Email required" });
+
       if (await rateLimit(`resend:${email}`, 2, 30000))
         return json({ success: false, message: "Wait before retry" });
 
@@ -143,7 +184,8 @@ export default {
         "SELECT otp, expires_at FROM otp_codes WHERE email = ?"
       ).bind(email).first();
 
-      if (!record) return json({ success: false, message: "No OTP found" });
+      if (!record)
+        return json({ success: false, message: "No OTP found" });
 
       if (Date.now() > record.expires_at)
         return json({ success: false, message: "OTP expired" });
@@ -161,19 +203,19 @@ export default {
       await env.DB.prepare("DELETE FROM otp_codes WHERE email = ?")
         .bind(email).run();
 
-      const payload = {
+      const token = await makeToken({
         user_id: result.meta.last_row_id,
         email,
         exp: Date.now() + 15 * 60 * 1000,
-      };
-
-      const refresh = makeToken({
-        email,
-        exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
-        type: "refresh",
       });
 
-      return json({ success: true, token: makeToken(payload), refresh });
+      const refresh = await makeToken({
+        email,
+        type: "refresh",
+        exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+      });
+
+      return json({ success: true, token, refresh });
     }
 
     // =========================
@@ -189,18 +231,19 @@ export default {
         "SELECT id FROM users WHERE email = ? AND password_hash = ?"
       ).bind(email, hashed).first();
 
-      if (!user) return json({ success: false, message: "Invalid login" });
+      if (!user)
+        return json({ success: false, message: "Invalid login" });
 
-      const token = makeToken({
+      const token = await makeToken({
         user_id: user.id,
         email,
         exp: Date.now() + 15 * 60 * 1000,
       });
 
-      const refresh = makeToken({
+      const refresh = await makeToken({
         email,
-        exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
         type: "refresh",
+        exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
       });
 
       return json({ success: true, token, refresh });
@@ -212,12 +255,21 @@ export default {
 
     if (path === "/auth/refresh" && request.method === "POST") {
       const { refresh } = await request.json();
-      const data = readToken(refresh);
+
+      const data = await readToken(refresh);
 
       if (!data || data.type !== "refresh" || Date.now() > data.exp)
         return json({ success: false, message: "Invalid refresh" });
 
-      const token = makeToken({
+      const user = await env.DB.prepare(
+        "SELECT id FROM users WHERE email = ?"
+      ).bind(data.email).first();
+
+      if (!user)
+        return json({ success: false, message: "User not found" });
+
+      const token = await makeToken({
+        user_id: user.id,
         email: data.email,
         exp: Date.now() + 15 * 60 * 1000,
       });
@@ -231,7 +283,8 @@ export default {
 
     if (path === "/auth/change-password" && request.method === "POST") {
       const session = await getUserFromToken();
-      if (!session) return json({ success: false, message: "Unauthorized" });
+      if (!session)
+        return json({ success: false, message: "Unauthorized" });
 
       const { old_password, new_password } = await request.json();
 
@@ -249,7 +302,7 @@ export default {
         "UPDATE users SET password_hash = ? WHERE id = ?"
       ).bind(newHash, user.id).run();
 
-      return json({ success: true, message: "Password updated" });
+      return json({ success: true });
     }
 
     // =========================
@@ -261,7 +314,7 @@ export default {
       if (!session) return json({ success: false });
 
       await env.DB.prepare(
-        "INSERT INTO sessions (token) VALUES (?)"
+        "INSERT OR IGNORE INTO sessions (token) VALUES (?)"
       ).bind(session.token).run();
 
       return json({ success: true });
