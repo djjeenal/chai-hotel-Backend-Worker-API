@@ -29,18 +29,21 @@ export default {
           .bind(email, otp, Date.now() + 5 * 60 * 1000)
           .run();
 
-        // ✅ BREVO EMAIL API
-        const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+        // ✅ BREVO EMAIL भेजो
+        await fetch("https://api.brevo.com/v3/smtp/email", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "api-key": env.BREVO_API_KEY,
           },
           body: JSON.stringify({
-            sender: { name: "Chai Hotel", email: "noreply@yourdomain.com" },
+            sender: {
+              name: "Chai Hotel",
+              email: "no-reply@chaihotel.xyz"
+            },
             to: [{ email }],
             subject: "Your OTP Code",
-            htmlContent: `<h2>Your OTP: ${otp}</h2>`,
+            htmlContent: `<h2>Your OTP: ${otp}</h2>`
           }),
         });
 
