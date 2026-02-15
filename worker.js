@@ -1,32 +1,30 @@
-function parseJwt(token) {
-    try {
-        if (!token || token.split('.').length !== 3) return null;
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
 
-        const base64 = token.split('.')[1]
-            .replace(/-/g, '+')
-            .replace(/_/g, '/');
-
-        const jsonPayload = decodeURIComponent(
-            atob(base64)
-                .split('')
-                .map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
-                .join('')
-        );
-
-        return JSON.parse(jsonPayload);
-    } catch (e) {
-        return null;
+    // Test Route
+    if (url.pathname === "/test") {
+      return Response.json({ success: true, message: "Backend working" });
     }
-}
 
-// SAFE TOKEN HANDLING
-const token = localStorage.getItem("token");
-const user = parseJwt(token);
+    // Register
+    if (url.pathname === "/auth/register" && request.method === "POST") {
+      const body = await request.json();
+      const { email, password } = body;
 
-if (!user) {
-    console.log("Invalid / Missing token → forcing logout");
-    localStorage.removeItem("token");
-}
+      if (!email || !password) {
+        return Response.json({ success: false, message: "Missing fields" });
+      }
 
-// OPTIONAL DEBUG
-console.log("User:", user);
+      await env.DB.prepare(
+        "INSERT INTO users (email, password_hash) VALUES (?, ?)"
+      )
+        .bind(email, password)
+        .run();
+
+      return Response.json({ success: true });
+    }
+
+    return Response.json({ success: false, message: "Not found" }, { status: 404 });
+  },
+};
