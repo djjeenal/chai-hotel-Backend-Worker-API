@@ -1,10 +1,23 @@
 export default {
   async fetch(request, env) {
 
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type"
+    };
+
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: corsHeaders });
+    }
+
     const url = new URL(request.url);
 
     if (url.pathname === "/") {
-      return Response.json({ success: true, message: "Backend working" });
+      return Response.json(
+        { success: true, message: "Backend working" },
+        { headers: corsHeaders }
+      );
     }
 
     if (request.method === "POST" && url.pathname === "/auth/send-otp") {
@@ -12,17 +25,19 @@ export default {
       const email = body.email;
 
       if (!email) {
-        return Response.json({ success: false, message: "Email required" });
+        return Response.json(
+          { success: false, message: "Email required" },
+          { headers: corsHeaders }
+        );
       }
 
-      // DEMO OTP
       const otp = "123456";
 
       await env.DB.prepare(
         "INSERT OR REPLACE INTO otp (email, code) VALUES (?, ?)"
       ).bind(email, otp).run();
 
-      return Response.json({ success: true });
+      return Response.json({ success: true }, { headers: corsHeaders });
     }
 
     if (request.method === "POST" && url.pathname === "/auth/verify-otp") {
@@ -34,16 +49,25 @@ export default {
       ).bind(email).first();
 
       if (!row || row.code !== otp) {
-        return Response.json({ success: false, message: "Invalid OTP" });
+        return Response.json(
+          { success: false, message: "Invalid OTP" },
+          { headers: corsHeaders }
+        );
       }
 
       await env.DB.prepare(
         "INSERT INTO users (email, password) VALUES (?, ?)"
       ).bind(email, password).run();
 
-      return Response.json({ success: true, token: "demo-token" });
+      return Response.json(
+        { success: true, token: "demo-token" },
+        { headers: corsHeaders }
+      );
     }
 
-    return Response.json({ success: false, message: "Not found" }, { status: 404 });
+    return Response.json(
+      { success: false, message: "Not found" },
+      { status: 404, headers: corsHeaders }
+    );
   }
 };
